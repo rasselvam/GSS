@@ -1,0 +1,3 @@
+candidate_first_name,candidate_middle_name,candidate_last_name,candidate_dob,candidate_father_name,candidate_mobile,candidate_email,candidate_state,candidate_city,joining_location,job_role,recruiter_name,recruiter_email,candidate_reference_id,requisition_id,customer_cost_center,rehire_candidate
+John,,Doe,31/12/1995,Robert Doe,9999999999,john.doe@example.com,Karnataka,Bangalore,Bangalore,Fresher,Recruiter One,recruiter.one@example.com,REF-001,REQ-001,CC-001,No
+Jane,A.,Smith,01/01/1997,David Smith,8888888888,jane.smith@example.com,Telangana,Hyderabad,Hyderabad,L1,Recruiter Two,recruiter.two@example.com,REF-002,REQ-002,CC-002,Yes

@@ -1,0 +1,135 @@
+(function () {
+    document.addEventListener('DOMContentLoaded', function () {
+        var msgEl = document.getElementById('qaDashMessage');
+        var refreshBtn = document.getElementById('qaDashRefreshBtn');
+        var autoEl = document.getElementById('qaDashAutoRefresh');
+
+        var kUsersTotal = document.getElementById('qaKpiUsersTotal');
+        var kQaUsers = document.getElementById('qaKpiQaUsers');
+        var kVrOpen = document.getElementById('qaKpiVrOpen');
+        var kDbvOpen = document.getElementById('qaKpiDbvOpen');
+        var vrHost = document.getElementById('qaWorkloadVrBody');
+        var dbvHost = document.getElementById('qaWorkloadDbvBody');
+        var asgHost = document.getElementById('qaAssignmentsBody');
+
+        var timer = null;
+
+        function setMessage(text, type) {
+            if (!msgEl) return;
+            msgEl.textContent = text || '';
+            msgEl.className = type ? ('alert alert-' + type) : '';
+            msgEl.style.display = text ? 'block' : 'none';
+        }
+
+        function esc(str) {
+            return String(str || '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        function n(v) {
+            var x = parseInt(v, 10);
+            return isFinite(x) ? x : 0;
+        }
+
+        function roleCount(map, key) {
+            if (!map) return 0;
+            var k = String(key || '').toLowerCase();
+            return n(map[k]);
+        }
+
+        function fmtName(r) {
+            var name = (String(r.first_name || '') + ' ' + String(r.last_name || '')).trim();
+            return name || String(r.username || '');
+        }
+
+        function renderWorkload(host, rows) {
+            if (!host) return;
+            rows = Array.isArray(rows) ? rows : [];
+            if (!rows.length) {
+                host.innerHTML = '<tr><td colspan="3" style="color:#64748b;">No active workload.</td></tr>';
+                return;
+            }
+            host.innerHTML = rows.map(function (r) {
+                return '<tr>' +
+                    '<td><div style="font-weight:800; color:#0f172a;">' + esc(fmtName(r)) + '</div><div style="font-size:11px; color:#64748b;">' + esc(String(r.username || '')) + ' • ' + esc(String(r.role || '')) + '</div></td>' +
+                    '<td style="white-space:nowrap;"><span class="badge" style="background:#0ea5e9; color:#fff;">' + esc(String(r.open_items || '0')) + '</span></td>' +
+                    '<td style="font-size:12px; color:#64748b;">Active</td>' +
+                '</tr>';
+            }).join('');
+        }
+
+        function renderAssignments(host, rows) {
+            if (!host) return;
+            rows = Array.isArray(rows) ? rows : [];
+            if (!rows.length) {
+                host.innerHTML = '<tr><td colspan="6" style="color:#64748b;">No active assignments.</td></tr>';
+                return;
+            }
+            host.innerHTML = rows.map(function (r) {
+                var who = fmtName(r);
+                var q = String(r.queue_type || '');
+                var group = r.group_key ? String(r.group_key) : '-';
+                var st = r.queue_status ? String(r.queue_status) : '-';
+                return '<tr>' +
+                    '<td style="font-weight:800;">' + esc(q) + '</td>' +
+                    '<td>' + esc(String(r.application_id || '')) + '<div style="font-size:11px; color:#64748b;">Case #' + esc(String(r.case_id || '')) + '</div></td>' +
+                    '<td>' + esc(group) + '</td>' +
+                    '<td><span class="badge" style="background:#f1f5f9; color:#0f172a; border:1px solid rgba(148,163,184,0.28);">' + esc(st) + '</span></td>' +
+                    '<td><div style="font-weight:800; color:#0f172a;">' + esc(who) + '</div><div style="font-size:11px; color:#64748b;">' + esc(String(r.role || '')) + '</div></td>' +
+                    '<td style="font-size:12px; color:#64748b;">' + esc(String(r.case_status || '')) + '</td>' +
+                '</tr>';
+            }).join('');
+        }
+
+        function setKpi(el, val) {
+            if (!el) return;
+            el.textContent = String(val == null ? '' : val);
+        }
+
+        function load() {
+            setMessage('', '');
+            var base = (window.APP_BASE_URL || '').replace(/\/$/, '');
+            fetch(base + '/api/qa/dashboard_stats.php', { credentials: 'same-origin' })
+                .then(function (res) { return res.json(); })
+                .then(function (data) {
+                    if (!data || data.status !== 1) throw new Error((data && data.message) ? data.message : 'Failed');
+
+                    var d = data.data || {};
+                    var kpis = d.kpis || {};
+
+                    setKpi(kUsersTotal, n(kpis.users_total));
+                    setKpi(kQaUsers, roleCount(kpis.users_by_role, 'qa'));
+                    setKpi(kVrOpen, n(kpis.verifier_queue_open_total));
+                    setKpi(kDbvOpen, n(kpis.dbv_open_total));
+
+                    renderWorkload(vrHost, d.workload && d.workload.vr ? d.workload.vr : []);
+                    renderWorkload(dbvHost, d.workload && d.workload.dbv ? d.workload.dbv : []);
+                    renderAssignments(asgHost, d.assignments || []);
+                })
+                .catch(function (e) {
+                    setMessage(e.message, 'danger');
+                });
+        }
+
+        function applyAuto() {
+            var on = !!(autoEl && autoEl.checked);
+            if (timer) {
+                clearInterval(timer);
+                timer = null;
+            }
+            if (on) {
+                timer = setInterval(load, 15000);
+            }
+        }
+
+        if (refreshBtn) refreshBtn.addEventListener('click', load);
+        if (autoEl) autoEl.addEventListener('change', applyAuto);
+
+        load();
+        applyAuto();
+    });
+})();

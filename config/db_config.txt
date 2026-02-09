@@ -1,0 +1,7 @@
+host=101.53.158.103
+port=63306
+dbname=vati.bgv.payfiller.com
+username=grdbuser
+password=Devuser@998
+charset=utf8mb4
+collation=utf8mb4_unicode_ci

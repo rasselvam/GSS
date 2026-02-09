@@ -1,0 +1,2985 @@
+(function () {
+    var REPORT_PAYLOAD = null;
+    var CURRENT_APP_ID = '';
+    var TL_CACHE = [];
+    var TL_ACTIVE_FILTER = 'all';
+
+    var SELECTED_UPLOAD_FILES = [];
+
+    var HOLIDAY_SET = {};
+    var HOLIDAYS_LOADED = false;
+
+    function qs(name) {
+        try {
+            return new URLSearchParams(window.location.search || '').get(name);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function openBsModal(id) {
+        try {
+            var el = document.getElementById(id);
+            if (!el || !window.bootstrap || !window.bootstrap.Modal) return;
+            var inst = window.bootstrap.Modal.getOrCreateInstance(el);
+            inst.show();
+        } catch (e) {
+        }
+    }
+
+    function escHtml(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+    }
+
+    async function initVerifierMailAndPrint(getPayload) {
+        var role = getRole();
+        if (role !== 'verifier') return;
+
+        var openBtn = document.getElementById('cvOpenMailModal');
+        var printBtn = document.getElementById('cvPrintLetterBtn');
+        var tplSel = document.getElementById('cvMailTemplateSelect');
+        var toEl = document.getElementById('cvMailToEmail');
+        var subjEl = document.getElementById('cvMailSubject');
+        var previewEl = document.getElementById('cvMailPreview');
+        var sendBtn = document.getElementById('cvMailSendBtn');
+
+        if (!openBtn || !tplSel || !previewEl || !sendBtn) return;
+
+        var base = (window.APP_BASE_URL || '').replace(/\/$/, '');
+        var templates = [];
+
+        function getContext() {
+            var payload = getPayload ? getPayload() : null;
+            var caseId = payload && payload.case && payload.case.case_id ? parseInt(payload.case.case_id, 10) : 0;
+            var appId = payload && payload.case && payload.case.application_id ? String(payload.case.application_id) : (qs('application_id') || '');
+            var group = getVerifierGroup();
+            return { case_id: caseId || null, application_id: appId || null, role: 'verifier', group: group || null };
+        }
+
+        async function loadTemplates(type) {
+            var url = base + '/api/shared/mail_templates_list.php';
+            if (type) url += '?type=' + encodeURIComponent(type);
+            var res = await fetch(url, { credentials: 'same-origin' });
+            var data = await res.json().catch(function () { return null; });
+            if (!res.ok || !data || data.status !== 1) {
+                throw new Error((data && data.message) ? data.message : 'Failed to load templates');
+            }
+            return Array.isArray(data.data) ? data.data : [];
+        }
+
+        function setTplOptions(list) {
+            templates = Array.isArray(list) ? list : [];
+            tplSel.innerHTML = '<option value="">Select Template</option>';
+            templates.forEach(function (t) {
+                var opt = document.createElement('option');
+                opt.value = String(t.template_id || '');
+                opt.textContent = (t.template_name || ('Template #' + t.template_id)) + (t.template_type ? (' (' + t.template_type + ')') : '');
+                tplSel.appendChild(opt);
+            });
+        }
+
+        async function renderSelected() {
+            var tplId = parseInt(tplSel.value || '0', 10) || 0;
+            if (!tplId) {
+                if (subjEl) subjEl.value = '';
+                previewEl.innerHTML = '<div style="color:#6b7280; font-size:13px;">Select a template to preview.</div>';
+                return;
+            }
+
+            previewEl.innerHTML = '<div style="color:#6b7280; font-size:13px;">Loading preview...</div>';
+            setBoxMessage('cvMailMessage', '', '');
+
+            var ctx = getContext();
+
+            var res = await fetch(base + '/api/shared/mail_template_render.php', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ template_id: tplId, application_id: ctx.application_id, case_id: ctx.case_id, role: ctx.role, group: ctx.group })
+            });
+            var data = await res.json().catch(function () { return null; });
+            if (!res.ok || !data || data.status !== 1 || !data.data) {
+                throw new Error((data && data.message) ? data.message : 'Failed to render');
+            }
+
+            if (subjEl) subjEl.value = data.data.subject || '';
+            previewEl.innerHTML = data.data.html || ('<pre style="white-space:pre-wrap; margin:0;">' + escHtml(data.data.body || '') + '</pre>');
+        }
+
+        async function sendMail() {
+            var tplId = parseInt(tplSel.value || '0', 10) || 0;
+            if (!tplId) {
+                setBoxMessage('cvMailMessage', 'Please select template.', 'danger');
+                return;
+            }
+            var to = toEl ? String(toEl.value || '').trim() : '';
+            if (!to) {
+                setBoxMessage('cvMailMessage', 'To Email is required.', 'danger');
+                return;
+            }
+
+            setBoxMessage('cvMailMessage', '', '');
+            sendBtn.disabled = true;
+            sendBtn.dataset.originalText = sendBtn.dataset.originalText || sendBtn.textContent;
+            sendBtn.textContent = 'Sending...';
+
+            try {
+                var ctx = getContext();
+                var res = await fetch(base + '/api/shared/mail_template_send.php', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ template_id: tplId, to_email: to, application_id: ctx.application_id, case_id: ctx.case_id, role: ctx.role, group: ctx.group })
+                });
+                var data = await res.json().catch(function () { return null; });
+                if (!res.ok || !data || data.status !== 1) {
+                    throw new Error((data && data.message) ? data.message : 'Send failed');
+                }
+                setBoxMessage('cvMailMessage', 'Sent successfully.', 'success');
+            } catch (e) {
+                setBoxMessage('cvMailMessage', (e && e.message) ? e.message : 'Send failed', 'danger');
+            } finally {
+                sendBtn.disabled = false;
+                sendBtn.textContent = sendBtn.dataset.originalText || 'Send';
+            }
+        }
+
+        async function printLetter() {
+            var tplId = parseInt(tplSel.value || '0', 10) || 0;
+            if (!tplId) {
+                alert('Please select template from Mail modal first.');
+                return;
+            }
+            var ctx = getContext();
+
+            var res = await fetch(base + '/api/shared/mail_template_render.php', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ template_id: tplId, application_id: ctx.application_id, case_id: ctx.case_id, role: ctx.role, group: ctx.group })
+            });
+            var data = await res.json().catch(function () { return null; });
+            if (!res.ok || !data || data.status !== 1 || !data.data) {
+                alert((data && data.message) ? data.message : 'Failed to render letter');
+                return;
+            }
+
+            var w = window.open('', '_blank');
+            if (!w) return;
+            var title = data.data.template_name || 'Letter';
+            w.document.open();
+            w.document.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + escHtml(title) + '</title>' +
+                '<style>body{font-family:Arial, sans-serif; padding:18px;} @media print{body{padding:0;}}</style>' +
+                '</head><body>' + (data.data.html || '') + '</body></html>');
+            w.document.close();
+            try { w.focus(); } catch (e) {}
+            setTimeout(function () { try { w.print(); } catch (e) {} }, 300);
+        }
+
+        if (!openBtn.dataset.bound) {
+            openBtn.dataset.bound = '1';
+            openBtn.addEventListener('click', async function () {
+                try {
+                    if (!templates.length) {
+                        var list = await loadTemplates('email');
+                        setTplOptions(list);
+                    }
+
+                    var payload = getPayload ? getPayload() : null;
+                    var basic = payload && payload.basic ? payload.basic : null;
+                    if (toEl && basic && (basic.email || basic.candidate_email)) {
+                        toEl.value = String(basic.email || basic.candidate_email || '');
+                    }
+
+                    previewEl.innerHTML = '<div style="color:#6b7280; font-size:13px;">Select a template to preview.</div>';
+                    if (subjEl) subjEl.value = '';
+                    setBoxMessage('cvMailMessage', '', '');
+                    openBsModal('cvMailModal');
+                } catch (e) {
+                    setBoxMessage('cvTopMessage', (e && e.message) ? e.message : 'Failed to open mail', 'danger');
+                }
+            });
+        }
+
+        if (!tplSel.dataset.bound) {
+            tplSel.dataset.bound = '1';
+            tplSel.addEventListener('change', function () {
+                renderSelected().catch(function (e) {
+                    setBoxMessage('cvMailMessage', (e && e.message) ? e.message : 'Failed to render', 'danger');
+                });
+            });
+        }
+
+        if (!sendBtn.dataset.bound) {
+            sendBtn.dataset.bound = '1';
+            sendBtn.addEventListener('click', sendMail);
+        }
+
+        if (printBtn && !printBtn.dataset.bound) {
+            printBtn.dataset.bound = '1';
+            printBtn.addEventListener('click', function () {
+                if (!tplSel.value) {
+                    openBtn.click();
+                    return;
+                }
+                printLetter();
+            });
+        }
+    }
+
+    function getVerifierGroup() {
+        var g = (window.VR_GROUP || qs('group') || '').toString().toUpperCase().trim();
+        // Verifier queue groups
+        if (g === 'BASIC' || g === 'EDUCATION') return g;
+        return '';
+    }
+
+    function getRole() {
+        return String(qs('role') || '').toLowerCase().trim();
+    }
+
+    function setBoxMessage(id, text, type) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        if (!text) {
+            el.style.display = 'none';
+            el.textContent = '';
+            el.className = '';
+            return;
+        }
+        el.style.display = 'block';
+        el.textContent = String(text);
+        el.className = type ? ('alert alert-' + type) : 'alert';
+    }
+
+    function allowedSectionsSet() {
+        var raw = (window.ALLOWED_SECTIONS || '').toString().toLowerCase().trim();
+        if (!raw || raw === '*') return { '*': true };
+        var out = {};
+        raw.split(/[\s,|]+/).forEach(function (p) {
+            var k = String(p || '').trim();
+            if (k) out[k] = true;
+        });
+        return out;
+    }
+
+    function canSeeSection(key, allowSet) {
+        if (!allowSet) allowSet = allowedSectionsSet();
+        if (allowSet['*']) return true;
+        var k = String(key || '').toLowerCase().trim();
+        return !!(k && allowSet[k]);
+    }
+
+    function sectionLabel(section) {
+        section = String(section || '').toLowerCase().trim();
+        if (section === 'basic') return 'Basic';
+        if (section === 'id') return 'Identification';
+        if (section === 'education') return 'Education';
+        if (section === 'employment') return 'Employment';
+        if (section === 'reference') return 'Reference';
+        if (section === 'ecourt') return 'E-court';
+        if (section === 'database') return 'Database';
+        if (section === 'driving_licence') return 'Driving Licence';
+        if (section === 'contact') return 'Contact';
+        if (section === 'reports') return 'Reports';
+        return section ? (section.charAt(0).toUpperCase() + section.slice(1)) : '';
+    }
+
+    function setCompNavActive(section) {
+        var host = document.getElementById('cvComponentNavItems');
+        if (!host) return;
+        section = String(section || '').toLowerCase().trim();
+        Array.prototype.slice.call(host.querySelectorAll('[data-comp]')).forEach(function (b) {
+            b.classList.toggle('active', String(b.getAttribute('data-comp') || '') === section);
+        });
+    }
+
+    function canShowComponentToolbar(section) {
+        section = String(section || '').toLowerCase().trim();
+        if (!section || section === 'timeline') return false;
+        var role = getRole();
+        if (!(role === 'verifier' || role === 'validator' || role === 'db_verifier')) return false;
+        // Only for real components (skip reports/contact if you later remove them)
+        return true;
+    }
+
+    function componentToolbarHtml(section) {
+        return '' +
+            '<div class="cr-comp-tools" style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; justify-content:space-between; margin-top:10px; border:1px solid rgba(148,163,184,0.22); border-radius:10px; padding:10px; background:#fff;">' +
+                '<div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">' +
+                    '<button type="button" class="cr-action-btn cr-dark" data-comp-action="hold">Hold</button>' +
+                    '<button type="button" class="cr-action-btn cr-danger" data-comp-action="reject">Reject</button>' +
+                    '<button type="button" class="cr-action-btn cr-ok" data-comp-action="approve">Approve</button>' +
+                '</div>' +
+                '<div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">' +
+                    '<div style="font-size:11px; font-weight:900; color:#475569;">Evidence Document</div>' +
+                    '<input type="file" data-comp-file accept=".pdf,image/*" style="max-width:260px;">' +
+                    '<button type="button" class="btn" data-comp-upload>Upload</button>' +
+                '</div>' +
+            '</div>' +
+            '<div class="cr-comp-evidence" style="margin-top:10px;">' +
+                '<div style="font-size:11px; font-weight:950; letter-spacing:.08em; text-transform:uppercase; color:#0f172a;">Evidence / Uploaded Documents</div>' +
+                '<div data-comp-docs style="margin-top:8px;"></div>' +
+            '</div>';
+    }
+
+    async function loadUploadedDocsForComponent(applicationId, docType, hostEl) {
+        if (!hostEl) return;
+        var base = (window.APP_BASE_URL || '').replace(/\/$/, '');
+        var url = base + '/api/shared/verification_docs_list.php?application_id=' + encodeURIComponent(applicationId);
+        if (docType) url += '&doc_type=' + encodeURIComponent(docType);
+
+        try {
+            var res = await fetch(url, { credentials: 'same-origin' });
+            var data = await res.json().catch(function () { return null; });
+            if (!res.ok || !data || data.status !== 1) {
+                hostEl.innerHTML = '<div style="color:#6b7280; font-size:13px;">No uploaded documents.</div>';
+                return;
+            }
+            var rows = data.data || [];
+            if (!Array.isArray(rows) || rows.length === 0) {
+                hostEl.innerHTML = '<div style="color:#6b7280; font-size:13px;">No uploaded documents.</div>';
+                return;
+            }
+
+            hostEl.innerHTML = rows.map(function (r) {
+                var href = docHref(r) || '#';
+                var label = (r && (r.original_name || r.file_path)) ? String(r.original_name || r.file_path) : 'Document';
+                var by = r && r.uploaded_by_role ? String(r.uploaded_by_role) : '';
+                var created = r && r.created_at ? String(r.created_at) : '';
+                return '<div style="display:flex; gap:10px; justify-content:space-between; align-items:flex-start; padding:8px 10px; border:1px solid rgba(148,163,184,0.18); border-radius:10px; margin-bottom:8px;">' +
+                    '<div style="min-width:0;">' +
+                        '<div style="font-size:12px; font-weight:900; color:#0f172a; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">' + esc(label) + '</div>' +
+                        '<div style="font-size:11px; color:#64748b; margin-top:2px;">' + (by ? ('By: ' + esc(by) + ' · ') : '') + esc(created) + '</div>' +
+                    '</div>' +
+                    '<a href="' + esc(href) + '" target="_blank" style="text-decoration:none; color:#2563eb; font-weight:900; white-space:nowrap;">View</a>' +
+                '</div>';
+            }).join('');
+        } catch (_e) {
+            hostEl.innerHTML = '<div style="color:#6b7280; font-size:13px;">No uploaded documents.</div>';
+        }
+    }
+
+    async function uploadEvidenceForComponent(applicationId, docType, files) {
+        var base = (window.APP_BASE_URL || '').replace(/\/$/, '');
+        var url = base + '/api/shared/verification_docs_upload.php';
+
+        var fd = new FormData();
+        fd.append('application_id', applicationId);
+        fd.append('doc_type', String(docType || 'general'));
+        fd.append('role', String(qs('role') || ''));
+        var clientId = qs('client_id');
+        if (clientId) fd.append('client_id', String(clientId));
+
+        for (var i = 0; i < files.length; i++) {
+            fd.append('files[]', files[i]);
+        }
+
+        var res = await fetch(url, { method: 'POST', body: fd, credentials: 'same-origin' });
+        var data = await res.json().catch(function () { return null; });
+        if (!res.ok || !data || data.status !== 1) {
+            throw new Error((data && data.message) ? data.message : 'Upload failed');
+        }
+        return data;
+    }
+
+    function ensureComponentToolbar(section) {
+        if (!canShowComponentToolbar(section)) return;
+        if (!CURRENT_APP_ID) return;
+
+        var panel = document.getElementById('section-' + String(section));
+        if (!panel) return;
+        if (panel.dataset.compToolsBound === '1') {
+            // refresh docs list when switching
+            var docsHost = panel.querySelector('[data-comp-docs]');
+            if (docsHost) {
+                loadUploadedDocsForComponent(CURRENT_APP_ID, section, docsHost);
+            }
+            return;
+        }
+
+        panel.dataset.compToolsBound = '1';
+        var secbar = panel.querySelector('.cr-secbar');
+        if (!secbar) return;
+
+        var wrap = document.createElement('div');
+        wrap.innerHTML = componentToolbarHtml(section);
+        secbar.insertAdjacentElement('afterend', wrap);
+
+        var docsHost2 = panel.querySelector('[data-comp-docs]');
+        if (docsHost2) {
+            loadUploadedDocsForComponent(CURRENT_APP_ID, section, docsHost2);
+        }
+
+        wrap.addEventListener('click', function (e) {
+            var t = e && e.target ? e.target : null;
+            if (!t) return;
+            var actBtn = t.closest ? t.closest('[data-comp-action]') : null;
+            if (actBtn) {
+                var action = String(actBtn.getAttribute('data-comp-action') || '').toLowerCase();
+                if (window.__CR_RUN_ACTION) {
+                    window.__CR_RUN_ACTION(action, action.charAt(0).toUpperCase() + action.slice(1));
+                }
+                return;
+            }
+
+            var upBtn = t.closest ? t.closest('[data-comp-upload]') : null;
+            if (upBtn) {
+                var fileEl = panel.querySelector('[data-comp-file]');
+                var files = fileEl && fileEl.files ? fileEl.files : null;
+                if (!files || files.length === 0) {
+                    setText('cvTopMessage', 'Please choose file(s) first.');
+                    return;
+                }
+                upBtn.disabled = true;
+                var oldText = upBtn.textContent;
+                upBtn.textContent = 'Uploading...';
+                uploadEvidenceForComponent(CURRENT_APP_ID, section, files)
+                    .then(function () {
+                        setText('cvTopMessage', 'Uploaded successfully.');
+                        if (fileEl) fileEl.value = '';
+                        var dh = panel.querySelector('[data-comp-docs]');
+                        if (dh) return loadUploadedDocsForComponent(CURRENT_APP_ID, section, dh);
+                    })
+                    .catch(function (err) {
+                        setText('cvTopMessage', err && err.message ? err.message : 'Upload failed');
+                    })
+                    .finally(function () {
+                        upBtn.disabled = false;
+                        upBtn.textContent = oldText;
+                    });
+            }
+        });
+    }
+
+    function renderComponentNav(payload) {
+        var role = getRole();
+        if (!(role === 'verifier' || role === 'validator' || role === 'db_verifier')) return;
+
+        var wrap = document.getElementById('cvComponentNav');
+        var host = document.getElementById('cvComponentNavItems');
+        if (!wrap || !host) return;
+
+        var keys = getAssignedComponentKeys(payload);
+        // Keep only real component keys we support in UI; ignore empty.
+        keys = (keys || []).filter(function (k) { return !!k; });
+
+        host.innerHTML = keys.map(function (k) {
+            return '<button type="button" class="cr-compnav-btn" data-comp="' + esc(k) + '">' + esc(sectionLabel(k)) + '</button>';
+        }).join('');
+
+        if (!host.dataset.bound) {
+            host.dataset.bound = '1';
+            host.addEventListener('click', function (e) {
+                var t = e && e.target ? e.target : null;
+                var btn = t && t.closest ? t.closest('[data-comp]') : null;
+                if (!btn) return;
+                var sec = btn.getAttribute('data-comp') || '';
+
+                // Reuse existing sidebar button handler (even if sidebar is hidden)
+                var sidebarBtn = document.querySelector('.list-group-item[data-section="' + sec.replace(/"/g, '') + '"]');
+                if (sidebarBtn) {
+                    sidebarBtn.click();
+                }
+                setCompNavActive(sec);
+            });
+        }
+
+        // Sync initial active from sidebar
+        var activeSidebar = document.querySelector('.list-group-item[data-section].active');
+        var activeSection = activeSidebar ? (activeSidebar.getAttribute('data-section') || '') : (keys[0] || 'basic');
+        setCompNavActive(activeSection);
+    }
+
+    function getAssignedComponentKeys(payload) {
+        payload = payload || {};
+        var d = payload.data || payload;
+        var list = Array.isArray(d.assigned_components) ? d.assigned_components : [];
+        var out = {};
+        list.forEach(function (r) {
+            var k = (r && r.component_key) ? String(r.component_key).toLowerCase().trim() : '';
+            if (k) out[k] = true;
+        });
+        // Common sections always visible
+        out.basic = true;
+        out.id = true;
+        return Object.keys(out);
+    }
+
+    function normSection(s) {
+        s = String(s || '').toLowerCase().trim();
+        if (!s) return '';
+        if (s === 'identification') return 'id';
+        if (s === 'general') return '';
+        return s;
+    }
+
+    function filterTimeline(items, section) {
+        section = normSection(section);
+        if (!section || section === 'all') return items;
+        return (items || []).filter(function (it) {
+            var s = normSection(it && it.section);
+            return s === section;
+        });
+    }
+
+    function renderMiniTimeline() {
+        var host = document.getElementById('cvMiniTimeline');
+        if (!host) return;
+
+        var filtered = filterTimeline(TL_CACHE, TL_ACTIVE_FILTER);
+        host.innerHTML = timelineHtml(filtered);
+
+        var countEl = document.getElementById('cvMiniTimelineCount');
+        if (countEl) {
+            countEl.textContent = String(Array.isArray(filtered) ? filtered.length : 0);
+        }
+    }
+
+    function setMiniTimelineFilter(section) {
+        TL_ACTIVE_FILTER = normSection(section) || 'all';
+
+        var allowSet = allowedSectionsSet();
+        var pills = Array.prototype.slice.call(document.querySelectorAll('#cvMiniTimelineFilters [data-tl-section]'));
+        pills.forEach(function (p) {
+            p.classList.toggle('active', normSection(p.getAttribute('data-tl-section')) === TL_ACTIVE_FILTER);
+        });
+
+        // Hide pills for disallowed sections
+        pills.forEach(function (p) {
+            var sec = normSection(p.getAttribute('data-tl-section') || '');
+            if (sec && sec !== 'all' && !canSeeSection(sec, allowSet)) {
+                p.style.display = 'none';
+            }
+        });
+
+        renderMiniTimeline();
+    }
+
+    function initMiniTimelineFilters() {
+        var wrap = document.getElementById('cvMiniTimelineFilters');
+        if (!wrap) return;
+        if (wrap.dataset.bound) return;
+        wrap.dataset.bound = '1';
+
+        wrap.addEventListener('click', function (e) {
+            var t = e && e.target ? e.target : null;
+            if (!t) return;
+            var btn = t.closest ? t.closest('[data-tl-section]') : null;
+            if (!btn) return;
+            var sec = btn.getAttribute('data-tl-section') || 'all';
+            setMiniTimelineFilter(sec);
+        });
+    }
+
+    function timelineHtml(items) {
+        if (!Array.isArray(items) || items.length === 0) {
+            return '<div style="color:#6b7280; font-size:13px;">No timeline yet.</div>';
+        }
+
+        var groups = {};
+        items.forEach(function (it) {
+            var dt = null;
+            try {
+                dt = it && it.created_at ? new Date(it.created_at) : null;
+                if (!dt || isNaN(dt.getTime())) dt = null;
+            } catch (_e) {
+                dt = null;
+            }
+            var key = dt ? dt.toISOString().slice(0, 10) : 'Unknown';
+            if (!groups[key]) groups[key] = [];
+            groups[key].push(it);
+        });
+
+        var keys = Object.keys(groups).sort().reverse();
+        var html = keys.map(function (k) {
+            var label = k === 'Unknown' ? 'Unknown date' : k;
+            var rows = groups[k] || [];
+
+            var itemsHtml = rows.map(function (it, idx) {
+                var side = (idx % 2 === 0) ? 'left' : 'right';
+                var actorName = ((it.first_name || '') + ' ' + (it.last_name || '')).trim();
+                var actorUser = (it.username || '') ? String(it.username) : '';
+                var role = it.actor_role || '';
+                var actor = actorName || actorUser || (role ? String(role).toUpperCase() : '') || 'System';
+                var type = it.event_type || '';
+                var section = it.section || '';
+                var msg = it.message || '';
+                var ts = '';
+                try {
+                    ts = it.created_at ? window.GSS_DATE.formatDbDateTime(it.created_at) : '';
+                } catch (_e) {
+                    ts = it.created_at ? String(it.created_at) : '';
+                }
+
+                var dotTone = 'blue';
+                var tLower = String(type || '').toLowerCase();
+                if (tLower.indexOf('hold') !== -1) dotTone = 'amber';
+                if (tLower.indexOf('reject') !== -1) dotTone = 'red';
+                if (tLower.indexOf('approve') !== -1 || tLower.indexOf('complete') !== -1) dotTone = 'green';
+
+                var badges = [];
+                if (type) badges.push('<span class="badge bg-secondary" style="margin-right:6px;">' + esc(type) + '</span>');
+                if (section) badges.push('<span class="badge bg-light text-dark" style="margin-right:6px; border:1px solid rgba(148,163,184,0.35);">' + esc(section) + '</span>');
+                if (role) badges.push('<span class="badge bg-light text-dark" style="border:1px solid rgba(148,163,184,0.35);">' + esc(role) + '</span>');
+
+                return (
+                    '<div class="cr-flow-item cr-flow-' + side + '">' +
+                        '<div class="cr-flow-dot cr-flow-dot-' + dotTone + '" aria-hidden="true"></div>' +
+                        '<div class="cr-flow-card">' +
+                            '<div class="cr-flow-head">' +
+                                '<div class="cr-flow-actor">' + esc(actor) + '</div>' +
+                                '<div class="cr-flow-time">' + esc(ts) + '</div>' +
+                            '</div>' +
+                            (badges.length ? ('<div class="cr-flow-badges">' + badges.join('') + '</div>') : '') +
+                            (msg ? ('<div class="cr-flow-msg">' + esc(msg) + '</div>') : '') +
+                        '</div>' +
+                    '</div>'
+                );
+            }).join('');
+
+            return (
+                '<div class="cr-flow-group">' +
+                    '<div class="cr-flow-date">' + esc(label) + '</div>' +
+                    '<div class="cr-flow-list">' + itemsHtml + '</div>' +
+                '</div>'
+            );
+
+        }).join('');
+
+        return '<div class="cr-flow">' + html + '</div>';
+    }
+
+    async function loadTimeline(applicationId) {
+        var host = document.getElementById('cvTimeline');
+        if (!host) return;
+
+        initMiniTimelineFilters();
+
+        var remarksHost = document.getElementById('cvRemarksPanel');
+        if (remarksHost) {
+            remarksHost.innerHTML = '';
+        }
+        if (!applicationId) {
+            host.innerHTML = '<div style="color:#6b7280; font-size:13px;">application_id not found.</div>';
+            var mini = document.getElementById('cvMiniTimeline');
+            if (mini) mini.innerHTML = '<div style="color:#6b7280; font-size:13px;">application_id not found.</div>';
+            return;
+        }
+
+        host.innerHTML = '<div style="color:#6b7280; font-size:13px;">Loading timeline...</div>';
+
+        var base = (window.APP_BASE_URL || '').replace(/\/$/, '');
+        var url = base + '/api/shared/case_timeline_list.php?application_id=' + encodeURIComponent(applicationId);
+
+        try {
+            var res = await fetch(url, { credentials: 'same-origin' });
+            var data = await res.json().catch(function () { return null; });
+
+            if (!res.ok || !data || data.status !== 1) {
+                host.innerHTML = '<div style="color:#b91c1c; font-size:13px;">Failed to load timeline.</div>';
+                var mini2 = document.getElementById('cvMiniTimeline');
+                if (mini2) mini2.innerHTML = '<div style="color:#b91c1c; font-size:13px;">Failed to load timeline.</div>';
+                return;
+            }
+
+            var items = data.data || [];
+            TL_CACHE = Array.isArray(items) ? items : [];
+            host.innerHTML = timelineHtml(TL_CACHE);
+            renderMiniTimeline();
+
+            try {
+                var activeBtn = document.querySelector('.list-group-item[data-section].active');
+                var activeSec = activeBtn ? (activeBtn.getAttribute('data-section') || '') : '';
+                renderRemarksPanel(activeSec);
+            } catch (_e) {
+            }
+
+            try {
+                refreshRemarksUi();
+            } catch (_e) {
+            }
+
+            var badge = document.getElementById('cvNavBadgeTimeline');
+            if (badge) {
+                badge.className = 'badge bg-secondary';
+                badge.textContent = String(Array.isArray(items) ? items.length : 0);
+            }
+        } catch (_e) {
+            host.innerHTML = '<div style="color:#b91c1c; font-size:13px;">Network error loading timeline.</div>';
+            var mini3 = document.getElementById('cvMiniTimeline');
+            if (mini3) mini3.innerHTML = '<div style="color:#b91c1c; font-size:13px;">Network error loading timeline.</div>';
+        }
+    }
+
+    function isRemarkItem(it) {
+        var type = it && it.event_type ? String(it.event_type).toLowerCase().trim() : '';
+        if (type && type !== 'comment') return false;
+        var msg = it && it.message ? String(it.message).trim() : '';
+        return msg !== '';
+    }
+
+    function remarkSectionKey(it) {
+        var sec = it && (it.section_key || it.section) ? String(it.section_key || it.section) : '';
+        sec = normSection(sec);
+        if (!sec || sec === 'remarks' || sec === 'case_status') return '';
+        return sec;
+    }
+
+    function chatItemsForSection(section) {
+        section = normSection(section);
+        var list = Array.isArray(TL_CACHE) ? TL_CACHE.filter(isRemarkItem) : [];
+        return list.filter(function (it) {
+            return remarkSectionKey(it) === section;
+        });
+    }
+
+    function remarksChatHtml(section) {
+        var items = chatItemsForSection(section);
+        if (!items.length) {
+            return '<div style="color:#6b7280; font-size:12px; padding:10px;">No remarks yet.</div>';
+        }
+        return items.slice(-50).map(function (it) {
+            var actorName = ((it.first_name || '') + ' ' + (it.last_name || '')).trim();
+            var actorUser = (it.username || '') ? String(it.username) : '';
+            var role2 = it.actor_role || '';
+            var actor = actorName || actorUser || (role2 ? String(role2).toUpperCase() : '') || 'System';
+            var ts = '';
+            try {
+                ts = it.created_at ? window.GSS_DATE.formatDbDateTime(it.created_at) : '';
+            } catch (_e) {
+                ts = it.created_at ? String(it.created_at) : '';
+            }
+
+            return '' +
+                '<div style="margin-bottom:10px;">' +
+                    '<div style="font-size:11px; color:#64748b; display:flex; justify-content:space-between; gap:10px;">' +
+                        '<span style="font-weight:900; color:#0f172a;">' + esc(actor) + '</span>' +
+                        '<span>' + esc(ts) + '</span>' +
+                    '</div>' +
+                    '<div style="margin-top:4px; background:rgba(59,130,246,0.06); border:1px solid rgba(148,163,184,0.18); border-radius:10px; padding:8px 10px; font-size:12px; color:#0f172a; white-space:pre-wrap;">' +
+                        esc(it.message || '') +
+                    '</div>' +
+                '</div>';
+        }).join('');
+    }
+
+    function ensureComponentChat(panel, section) {
+        if (!panel) return;
+        section = normSection(section);
+        if (!section) return;
+
+        var role = getRole();
+        if (!(role === 'verifier' || role === 'validator' || role === 'db_verifier')) return;
+        if (String(qs('print') || '') === '1') return;
+
+        // Create right-side chat column once
+        if (panel.dataset.chatBound !== '1') {
+            panel.dataset.chatBound = '1';
+
+            var secbar = panel.querySelector('.cr-secbar');
+            if (!secbar) return;
+
+            // Wrap all content after secbar into a two-column layout
+            var after = [];
+            var n = secbar.nextSibling;
+            while (n) {
+                var next = n.nextSibling;
+                // skip empty text nodes
+                if (!(n.nodeType === 3 && String(n.textContent || '').trim() === '')) {
+                    after.push(n);
+                }
+                n = next;
+            }
+
+            var layout = document.createElement('div');
+            layout.className = 'cr-comp-layout';
+            layout.style.display = 'grid';
+            layout.style.gridTemplateColumns = '1fr 340px';
+            layout.style.gap = '12px';
+            layout.style.marginTop = '10px';
+
+            var left = document.createElement('div');
+            left.className = 'cr-comp-left';
+
+            var right = document.createElement('div');
+            right.className = 'cr-comp-chat';
+            right.style.border = '1px solid rgba(148,163,184,0.22)';
+            right.style.borderRadius = '10px';
+            right.style.background = '#fff';
+            right.style.padding = '10px';
+            right.innerHTML = '' +
+                '<div style="font-size:11px; font-weight:950; letter-spacing:.10em; text-transform:uppercase; color:#64748b;">Remarks</div>' +
+                '<div data-chat-list style="margin-top:10px; max-height:320px; overflow:auto; padding-right:4px;"></div>' +
+                '<div style="margin-top:10px;">' +
+                    '<textarea data-chat-text rows="3" placeholder="Enter comments..." style="width:100%; resize:vertical; border:1px solid rgba(148,163,184,0.25); border-radius:10px; padding:8px 10px; font-size:12px;"></textarea>' +
+                    '<div style="display:flex; justify-content:flex-end; margin-top:8px;">' +
+                        '<button type="button" class="btn btn-sm" data-chat-save>Save</button>' +
+                    '</div>' +
+                '</div>';
+
+            // Move all existing nodes into left column
+            after.forEach(function (node) {
+                left.appendChild(node);
+            });
+
+            layout.appendChild(left);
+            layout.appendChild(right);
+            secbar.insertAdjacentElement('afterend', layout);
+
+            right.addEventListener('click', function (e) {
+                var t = e && e.target ? e.target : null;
+                var btn = t && t.closest ? t.closest('[data-chat-save]') : null;
+                if (!btn) return;
+                if (!CURRENT_APP_ID) return;
+
+                var ta = right.querySelector('[data-chat-text]');
+                var msg = ta ? String(ta.value || '').trim() : '';
+                if (!msg) {
+                    setText('cvTopMessage', 'Remark is required.');
+                    return;
+                }
+
+                btn.disabled = true;
+                var base = (window.APP_BASE_URL || '').replace(/\/$/, '');
+                fetch(base + '/api/shared/case_timeline_add.php', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({
+                        application_id: CURRENT_APP_ID,
+                        event_type: 'comment',
+                        section_key: section,
+                        message: msg
+                    })
+                })
+                    .then(function (res) { return res.json().catch(function () { return { status: 0, message: 'Invalid server response.' }; }); })
+                    .then(function (data) {
+                        if (!data || data.status !== 1) {
+                            setText('cvTopMessage', (data && data.message) ? data.message : 'Failed to save remark.');
+                            return;
+                        }
+                        if (ta) ta.value = '';
+                        setText('cvTopMessage', 'Saved.');
+                        if (CURRENT_APP_ID) {
+                            return loadTimeline(CURRENT_APP_ID);
+                        }
+                    })
+                    .catch(function () {
+                        setText('cvTopMessage', 'Network error. Please try again.');
+                    })
+                    .finally(function () {
+                        btn.disabled = false;
+                    });
+            });
+        }
+
+        // Refresh chat list for this section
+        var listHost = panel.querySelector('[data-chat-list]');
+        if (listHost) {
+            listHost.innerHTML = remarksChatHtml(section);
+            try {
+                listHost.scrollTop = listHost.scrollHeight;
+            } catch (_e) {
+            }
+        }
+    }
+
+    function renderRemarksPanel(activeSection) {
+        var host = document.getElementById('cvRemarksPanel');
+        var countEl = document.getElementById('cvRemarksPanelCount');
+        if (!host) return;
+
+        var role = getRole();
+        if (!(role === 'verifier' || role === 'validator' || role === 'db_verifier')) return;
+
+        var list = Array.isArray(TL_CACHE) ? TL_CACHE.filter(isRemarkItem) : [];
+        if (countEl) {
+            countEl.textContent = String(list.length);
+        }
+
+        if (!list.length) {
+            host.innerHTML = '<div style="color:#6b7280; font-size:13px;">No remarks yet.</div>';
+            return;
+        }
+
+        var groups = {};
+        list.forEach(function (it) {
+            var k = remarkSectionKey(it) || 'general';
+            if (!groups[k]) groups[k] = [];
+            groups[k].push(it);
+        });
+
+        var order = Object.keys(groups);
+        order.sort(function (a, b) {
+            if (a === 'general') return 1;
+            if (b === 'general') return -1;
+            return a.localeCompare(b);
+        });
+
+        activeSection = String(activeSection || '').toLowerCase().trim();
+
+        host.innerHTML = order.map(function (k) {
+            var label = sectionLabel(k === 'general' ? 'General' : k);
+            var items = groups[k] || [];
+            var isActive = (k !== 'general' && k === activeSection);
+            var open = isActive ? ' open' : '';
+            return '' +
+                '<div class="cr-remarksbar-group" data-rg="' + esc(k) + '">' +
+                    '<div class="cr-remarksbar-head' + (isActive ? ' active' : '') + '" data-rh="1" data-sec="' + esc(k) + '">' +
+                        '<b>' + esc(label) + '</b>' +
+                        '<span class="badge bg-secondary">' + esc(String(items.length)) + '</span>' +
+                    '</div>' +
+                    '<div class="cr-remarksbar-body' + open + '">' +
+                        items.slice(0, 30).map(function (it) {
+                            var actorName = ((it.first_name || '') + ' ' + (it.last_name || '')).trim();
+                            var actorUser = (it.username || '') ? String(it.username) : '';
+                            var role2 = it.actor_role || '';
+                            var actor = actorName || actorUser || (role2 ? String(role2).toUpperCase() : '') || 'System';
+                            var ts = '';
+                            try {
+                                ts = it.created_at ? window.GSS_DATE.formatDbDateTime(it.created_at) : '';
+                            } catch (_e) {
+                                ts = it.created_at ? String(it.created_at) : '';
+                            }
+                            return '' +
+                                '<div class="cr-remark-item">' +
+                                    '<div class="cr-remark-meta"><span>' + esc(actor) + '</span><span>' + esc(ts) + '</span></div>' +
+                                    '<div class="cr-remark-msg">' + esc(it.message || '') + '</div>' +
+                                '</div>';
+                        }).join('') +
+                    '</div>' +
+                '</div>';
+        }).join('');
+
+        if (!host.dataset.bound) {
+            host.dataset.bound = '1';
+            host.addEventListener('click', function (e) {
+                var t = e && e.target ? e.target : null;
+                if (!t) return;
+                var head = t.closest ? t.closest('[data-rh="1"]') : null;
+                if (!head) return;
+
+                var sec = String(head.getAttribute('data-sec') || '');
+                var body = head.parentElement ? head.parentElement.querySelector('.cr-remarksbar-body') : null;
+                if (body) {
+                    body.classList.toggle('open');
+                }
+
+                if (sec && sec !== 'general') {
+                    var sidebarBtn = document.querySelector('.list-group-item[data-section="' + sec.replace(/"/g, '') + '"]');
+                    if (sidebarBtn) {
+                        sidebarBtn.click();
+                    }
+                }
+            });
+        }
+    }
+
+    function remarksHtml(items) {
+        var list = Array.isArray(items) ? items.filter(isRemarkItem) : [];
+        if (!list.length) {
+            return '<div style="color:#6b7280; font-size:13px;">No remarks yet.</div>';
+        }
+        return '<div style="display:flex; flex-direction:column; gap:10px;">' + list.map(function (it) {
+            var actorName = ((it.first_name || '') + ' ' + (it.last_name || '')).trim();
+            var actorUser = (it.username || '') ? String(it.username) : '';
+            var role = it.actor_role || '';
+            var actor = actorName || actorUser || (role ? String(role).toUpperCase() : '') || 'System';
+            var ts = '';
+            try {
+                ts = it.created_at ? window.GSS_DATE.formatDbDateTime(it.created_at) : '';
+            } catch (_e) {
+                ts = it.created_at ? String(it.created_at) : '';
+            }
+            var section = it.section_key || '';
+            var badges = [];
+            if (section) badges.push('<span class="badge bg-light text-dark" style="margin-right:6px; border:1px solid rgba(148,163,184,0.35);">' + esc(section) + '</span>');
+            if (role) badges.push('<span class="badge bg-light text-dark" style="border:1px solid rgba(148,163,184,0.35);">' + esc(role) + '</span>');
+            return (
+                '<div style="border:1px solid rgba(148,163,184,0.25); border-radius:14px; padding:10px; background:linear-gradient(180deg,#ffffff,#f8fafc);">' +
+                    '<div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start;">' +
+                        '<div style="min-width:0;">' +
+                            '<div style="font-weight:900; color:#0f172a; font-size:13px;">' + esc(actor) + '</div>' +
+                            (badges.length ? ('<div style="margin-top:6px;">' + badges.join('') + '</div>') : '') +
+                        '</div>' +
+                        '<div style="color:#64748b; font-size:12px; white-space:nowrap;">' + esc(ts) + '</div>' +
+                    '</div>' +
+                    '<div style="margin-top:8px; color:#0f172a; font-size:13px; white-space:pre-wrap;">' + esc(it.message || '') + '</div>' +
+                '</div>'
+            );
+        }).join('') + '</div>';
+    }
+
+    function refreshRemarksUi() {
+        var list = Array.isArray(TL_CACHE) ? TL_CACHE.filter(isRemarkItem) : [];
+
+        var countEl = document.getElementById('cvRemarksCount');
+        if (countEl) {
+            countEl.className = 'badge bg-secondary';
+            countEl.textContent = String(list.length);
+        }
+
+        var badge = document.getElementById('cvRemarksBadge');
+        if (badge) {
+            badge.textContent = String(list.length);
+            badge.style.display = list.length ? 'inline-flex' : 'none';
+        }
+
+        var host = document.getElementById('cvRemarksList');
+        if (host) {
+            host.innerHTML = remarksHtml(list);
+        }
+    }
+
+    function initRemarksModal(applicationId) {
+        var openBtn = document.getElementById('cvOpenRemarksModal');
+        if (openBtn && !openBtn.dataset.bound) {
+            openBtn.dataset.bound = '1';
+            openBtn.addEventListener('click', function () {
+                try {
+                    refreshRemarksUi();
+                } catch (_e) {
+                }
+                openBsModal('cvRemarksModal');
+            });
+        }
+
+        var saveBtn = document.getElementById('cvRemarksSaveBtn');
+        var ta = document.getElementById('cvRemarksText');
+        if (saveBtn && ta && !saveBtn.dataset.bound) {
+            saveBtn.dataset.bound = '1';
+            saveBtn.addEventListener('click', function () {
+                var appId = applicationId || qs('application_id') || '';
+                var msg = (ta.value || '').trim();
+                if (!appId) return;
+                if (!msg) {
+                    setBoxMessage('cvRemarksMessage', 'Remark is required.', 'danger');
+                    return;
+                }
+
+                setBoxMessage('cvRemarksMessage', '', '');
+                saveBtn.disabled = true;
+
+                var base = (window.APP_BASE_URL || '').replace(/\/$/, '');
+                fetch(base + '/api/shared/case_timeline_add.php', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({
+                        application_id: appId,
+                        event_type: 'comment',
+                        section_key: 'remarks',
+                        message: msg
+                    })
+                })
+                    .then(function (res) { return res.json().catch(function () { return { status: 0, message: 'Invalid server response.' }; }); })
+                    .then(function (data) {
+                        if (!data || data.status !== 1) {
+                            setBoxMessage('cvRemarksMessage', (data && data.message) ? data.message : 'Failed to save remark.', 'danger');
+                            return;
+                        }
+                        ta.value = '';
+                        setBoxMessage('cvRemarksMessage', 'Saved.', 'success');
+                        try {
+                            if (appId) loadTimeline(appId);
+                        } catch (_e) {
+                        }
+                    })
+                    .catch(function () {
+                        setBoxMessage('cvRemarksMessage', 'Network error. Please try again.', 'danger');
+                    })
+                    .finally(function () {
+                        saveBtn.disabled = false;
+                    });
+            });
+        }
+    }
+
+    function bytesToHuman(n) {
+        var v = Number(n || 0);
+        if (!isFinite(v) || v <= 0) return '0 B';
+        var units = ['B', 'KB', 'MB', 'GB'];
+        var i = 0;
+        while (v >= 1024 && i < units.length - 1) {
+            v = v / 1024;
+            i++;
+        }
+        return (Math.round(v * 10) / 10) + ' ' + units[i];
+    }
+
+    function syncInputFilesFromSelected(inputEl) {
+        if (!inputEl) return;
+        try {
+            var dt = new DataTransfer();
+            (SELECTED_UPLOAD_FILES || []).forEach(function (f) {
+                try { dt.items.add(f); } catch (_e) {}
+            });
+            inputEl.files = dt.files;
+        } catch (_e) {
+        }
+    }
+
+    function addFilesToSelected(filesLike, inputEl) {
+        var list = [];
+        try {
+            list = filesLike ? Array.prototype.slice.call(filesLike) : [];
+        } catch (_e) {
+            list = [];
+        }
+
+        if (!Array.isArray(SELECTED_UPLOAD_FILES)) SELECTED_UPLOAD_FILES = [];
+        list.forEach(function (f) {
+            if (!f) return;
+            var key = (f.name || '') + '|' + (f.size || 0) + '|' + (f.lastModified || 0);
+            var exists = SELECTED_UPLOAD_FILES.some(function (x) {
+                var k2 = (x.name || '') + '|' + (x.size || 0) + '|' + (x.lastModified || 0);
+                return k2 === key;
+            });
+            if (!exists) SELECTED_UPLOAD_FILES.push(f);
+        });
+
+        syncInputFilesFromSelected(inputEl);
+    }
+
+    function removeSelectedFileAt(idx, inputEl) {
+        idx = parseInt(String(idx), 10);
+        if (!Array.isArray(SELECTED_UPLOAD_FILES)) SELECTED_UPLOAD_FILES = [];
+        if (isNaN(idx) || idx < 0 || idx >= SELECTED_UPLOAD_FILES.length) return;
+        SELECTED_UPLOAD_FILES.splice(idx, 1);
+        syncInputFilesFromSelected(inputEl);
+    }
+
+    function setSelectedFilesUi(files) {
+        var chipsEl = document.getElementById('cvFileChips');
+        var metaEl = document.getElementById('cvFileMeta');
+        if (chipsEl) chipsEl.innerHTML = '';
+
+        var list = [];
+        try {
+            list = files ? Array.prototype.slice.call(files) : [];
+        } catch (e) {
+            list = [];
+        }
+
+        if (!list.length) {
+            if (metaEl) metaEl.textContent = 'or drag & drop here';
+            return;
+        }
+
+        var total = list.reduce(function (acc, f) { return acc + (f && f.size ? f.size : 0); }, 0);
+        if (metaEl) metaEl.textContent = list.length + ' file(s) selected • ' + bytesToHuman(total);
+
+        if (chipsEl) {
+            chipsEl.innerHTML = list.map(function (f, idx) {
+                var name = (f && f.name) ? String(f.name) : 'file';
+                return '<span class="cr-chip" title="' + esc(name) + '">' +
+                    '<span>' + esc(name) + '</span>' +
+                    '<button type="button" class="cr-chip-x" data-chip-idx="' + String(idx) + '">X</button>' +
+                '</span>';
+            }).join('');
+        }
+    }
+
+    function initUploadPicker() {
+        var drop = document.getElementById('cvFileDrop');
+        var input = document.getElementById('cvUploadFiles');
+        if (!drop || !input) return;
+
+        if (drop.dataset.bound) {
+            if (Array.isArray(SELECTED_UPLOAD_FILES) && SELECTED_UPLOAD_FILES.length) {
+                syncInputFilesFromSelected(input);
+                setSelectedFilesUi(input.files);
+            } else {
+                setSelectedFilesUi(input.files);
+            }
+            return;
+        }
+        drop.dataset.bound = '1';
+
+        if (!Array.isArray(SELECTED_UPLOAD_FILES)) SELECTED_UPLOAD_FILES = [];
+        addFilesToSelected(input.files, input);
+        setSelectedFilesUi(input.files);
+
+        input.addEventListener('change', function () {
+            SELECTED_UPLOAD_FILES = [];
+            addFilesToSelected(input.files, input);
+            setSelectedFilesUi(input.files);
+        });
+
+        var chipsEl = document.getElementById('cvFileChips');
+        if (chipsEl && !chipsEl.dataset.bound) {
+            chipsEl.dataset.bound = '1';
+            chipsEl.addEventListener('click', function (e) {
+                var t = e && e.target ? e.target : null;
+                if (!t) return;
+                var btn = t.closest ? t.closest('[data-chip-idx]') : null;
+                if (!btn) return;
+                var idx = btn.getAttribute('data-chip-idx');
+                removeSelectedFileAt(idx, input);
+                setSelectedFilesUi(input.files);
+            });
+        }
+
+        var dragCounter = 0;
+
+        function setDragState(on) {
+            drop.classList.toggle('cr-dragover', !!on);
+        }
+
+        drop.addEventListener('dragenter', function (e) {
+            e.preventDefault();
+            dragCounter++;
+            setDragState(true);
+        });
+
+        drop.addEventListener('dragover', function (e) {
+            e.preventDefault();
+            setDragState(true);
+        });
+
+        drop.addEventListener('dragleave', function (e) {
+            e.preventDefault();
+            dragCounter = Math.max(0, dragCounter - 1);
+            if (dragCounter === 0) setDragState(false);
+        });
+
+        drop.addEventListener('drop', function (e) {
+            e.preventDefault();
+            dragCounter = 0;
+            setDragState(false);
+
+            var dt = e.dataTransfer;
+            if (!dt || !dt.files) return;
+            addFilesToSelected(dt.files, input);
+            setSelectedFilesUi(input.files);
+        });
+
+        if (!drop.dataset.pasteBound) {
+            drop.dataset.pasteBound = '1';
+            drop.setAttribute('tabindex', '0');
+            drop.addEventListener('paste', function (e) {
+                var cd = e && e.clipboardData ? e.clipboardData : null;
+                if (!cd || !cd.items) return;
+                var files = [];
+                for (var i = 0; i < cd.items.length; i++) {
+                    var it = cd.items[i];
+                    if (it && it.kind === 'file') {
+                        var f = it.getAsFile ? it.getAsFile() : null;
+                        if (f) files.push(f);
+                    }
+                }
+                if (files.length) {
+                    e.preventDefault();
+                    addFilesToSelected(files, input);
+                    setSelectedFilesUi(input.files);
+                }
+            });
+        }
+    }
+
+    function initValidatorRemarks() {
+        var role = getRole();
+        if (role !== 'validator') return;
+
+        var map = [
+            { section: 'basic', ta: 'cvRemarksBasic', btn: 'cvSaveRemarksBasic' },
+            { section: 'id', ta: 'cvRemarksId', btn: 'cvSaveRemarksId' },
+            { section: 'contact', ta: 'cvRemarksContact', btn: 'cvSaveRemarksContact' },
+            { section: 'education', ta: 'cvRemarksEducation', btn: 'cvSaveRemarksEducation' },
+            { section: 'employment', ta: 'cvRemarksEmployment', btn: 'cvSaveRemarksEmployment' },
+            { section: 'reference', ta: 'cvRemarksReference', btn: 'cvSaveRemarksReference' },
+            { section: 'reports', ta: 'cvRemarksReports', btn: 'cvSaveRemarksReports' }
+        ];
+
+        map.forEach(function (cfg) {
+            var btn = document.getElementById(cfg.btn);
+            var ta = document.getElementById(cfg.ta);
+            if (!btn || !ta) return;
+            if (btn.dataset.bound) return;
+            btn.dataset.bound = '1';
+
+            btn.addEventListener('click', function () {
+                var applicationId = qs('application_id') || '';
+                var msg = (ta.value || '').trim();
+                if (!applicationId) return;
+                if (!msg) return;
+
+                btn.disabled = true;
+                var base = (window.APP_BASE_URL || '').replace(/\/$/, '');
+                fetch(base + '/api/shared/case_timeline_add.php', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({
+                        application_id: applicationId,
+                        event_type: 'comment',
+                        section_key: String(cfg.section || 'basic'),
+                        message: msg
+                    })
+                })
+                    .then(function (res) { return res.json().catch(function () { return { status: 0, message: 'Invalid server response.' }; }); })
+                    .then(function (data) {
+                        var out = document.getElementById('cvTopMessage');
+                        if (!data || data.status !== 1) {
+                            if (out) out.textContent = (data && data.message) ? data.message : 'Failed to save remarks.';
+                            return;
+                        }
+                        if (out) out.textContent = 'Saved.';
+                        try {
+                            var appId = qs('application_id') || '';
+                            if (appId) loadTimeline(appId);
+                        } catch (_e) {}
+                    })
+                    .catch(function () {
+                        var out = document.getElementById('cvTopMessage');
+                        if (out) out.textContent = 'Network error. Please try again.';
+                    })
+                    .finally(function () {
+                        btn.disabled = false;
+                    });
+            });
+        });
+    }
+
+    function openBsModal(id) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        if (window.bootstrap && window.bootstrap.Modal && typeof window.bootstrap.Modal.getOrCreateInstance === 'function') {
+            var m = window.bootstrap.Modal.getOrCreateInstance(el);
+            m.show();
+            return;
+        }
+        el.style.display = 'block';
+    }
+
+    function initHeaderModals(applicationId) {
+        var openUpload = document.getElementById('cvOpenUploadModal');
+        if (openUpload && !openUpload.dataset.bound) {
+            openUpload.dataset.bound = '1';
+            openUpload.addEventListener('click', function () {
+                openBsModal('cvUploadModal');
+                initUploadPicker();
+                var uploadTypeEl = document.getElementById('cvUploadDocType');
+                var currentType = uploadTypeEl ? String(uploadTypeEl.value || '') : '';
+                if (applicationId) loadUploadedDocs(applicationId, currentType);
+            });
+        }
+
+        var openTimeline = document.getElementById('cvOpenTimelineModal');
+        if (openTimeline && !openTimeline.dataset.bound) {
+            openTimeline.dataset.bound = '1';
+            openTimeline.addEventListener('click', function () {
+                openBsModal('cvTimelineModal');
+            });
+        }
+
+        initRemarksModal(applicationId);
+    }
+
+    function esc(str) {
+        return String(str || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+    }
+
+    function isImageMime(m) {
+        var v = String(m || '').toLowerCase();
+        return v.indexOf('image/') === 0;
+    }
+
+    function isPdfMime(m) {
+        var v = String(m || '').toLowerCase();
+        return v.indexOf('pdf') !== -1;
+    }
+
+    function docHref(row) {
+        var base = (window.APP_BASE_URL || '').replace(/\/$/, '');
+        var fp = row && row.file_path ? String(row.file_path) : '';
+        if (!fp) return '';
+        if (/^https?:\/\//i.test(fp)) return fp;
+
+        // normalize to avoid double base path like /GSS1/GSS1/...
+        try {
+            if (base) {
+                var bPath = base.replace(/^https?:\/\/[^/]+/i, '');
+                if (bPath && bPath !== '/' && fp.indexOf(bPath + '/') === 0) {
+                    fp = fp.substring(bPath.length);
+                }
+            }
+        } catch (_e) {
+        }
+
+        if (fp.indexOf('/') === 0) return base + fp;
+        return base + '/' + fp;
+    }
+
+    function renderDocPreviewPanel(rows) {
+        var role = getRole();
+        if (role !== 'validator') return;
+
+        var frameHost = document.getElementById('cvDocPreviewFrameHost');
+        var listHost = document.getElementById('cvDocPreviewList');
+        if (!frameHost || !listHost) return;
+
+        var list = Array.isArray(rows) ? rows.slice() : [];
+        if (!list.length) {
+            frameHost.innerHTML = '<div style="padding:10px; color:#64748b; font-size:12px;">No document selected.</div>';
+            listHost.innerHTML = '<div style="padding:10px; color:#64748b; font-size:12px;">No uploaded documents.</div>';
+            return;
+        }
+
+        listHost.innerHTML = list.map(function (r, idx) {
+            var label = (r && (r.original_name || r.file_path)) ? String(r.original_name || r.file_path) : ('Document ' + (idx + 1));
+            var dt = r && r.doc_type ? String(r.doc_type) : '';
+            var by = r && r.uploaded_by_role ? String(r.uploaded_by_role) : '';
+            return '<div class="cr-docbar-item" data-doc-idx="' + String(idx) + '">' +
+                '<div style="min-width:0; flex:1;">' +
+                    '<div class="cr-docbar-meta">' + esc(dt || 'Document') + '</div>' +
+                    '<div class="cr-docbar-sub">' + esc(label) + (by ? (' · ' + esc(by)) : '') + '</div>' +
+                '</div>' +
+                '<div class="cr-docbar-open">Open</div>' +
+            '</div>';
+        }).join('');
+
+        function setActive(idx) {
+            idx = parseInt(String(idx), 10);
+            if (isNaN(idx) || idx < 0 || idx >= list.length) return;
+
+            var r = list[idx];
+            var href = docHref(r);
+            if (!href) return;
+
+            Array.prototype.slice.call(listHost.querySelectorAll('.cr-docbar-item')).forEach(function (el) {
+                el.classList.toggle('active', String(el.getAttribute('data-doc-idx')) === String(idx));
+            });
+
+            var mt = r && r.mime_type ? String(r.mime_type) : '';
+            if (isImageMime(mt)) {
+                frameHost.innerHTML = '<img src="' + esc(href) + '" alt="document" />';
+                return;
+            }
+
+            if (isPdfMime(mt) || href.toLowerCase().indexOf('.pdf') !== -1) {
+                frameHost.innerHTML = '<iframe src="' + esc(href) + '"></iframe>';
+                return;
+            }
+
+            frameHost.innerHTML = '<div style="padding:10px; color:#0f172a; font-size:12px;">' +
+                '<div style="font-weight:900; margin-bottom:6px;">Preview not available</div>' +
+                '<a href="' + esc(href) + '" target="_blank" style="text-decoration:none; color:#2563eb; font-weight:800;">Open document</a>' +
+                '</div>';
+        }
+
+        if (!listHost.dataset.bound) {
+            listHost.dataset.bound = '1';
+            listHost.addEventListener('click', function (e) {
+                var t = e && e.target ? e.target : null;
+                var item = t && t.closest ? t.closest('.cr-docbar-item') : null;
+                if (!item) return;
+                var idx = item.getAttribute('data-doc-idx');
+                setActive(idx);
+            });
+        }
+
+        setActive(0);
+    }
+
+    function fileUrlForField(fieldKey, value) {
+        var v = (value === null || typeof value === 'undefined') ? '' : String(value);
+        v = v.trim();
+        if (!v || v === 'INSUFFICIENT_DOCUMENTS') return '';
+
+        var base = (window.APP_BASE_URL || '').replace(/\/$/, '');
+
+        if (v.indexOf('/uploads/') === 0) return base + v;
+        if (/^https?:\/\//i.test(v)) return v;
+
+        var k = String(fieldKey || '').toLowerCase();
+        if (k === 'upload_document') return base + '/uploads/identification/' + encodeURIComponent(v);
+        if (k === 'proof_file') return base + '/uploads/address/' + encodeURIComponent(v);
+        if (k === 'marksheet_file' || k === 'degree_file') return base + '/uploads/education/' + encodeURIComponent(v);
+        if (k === 'employment_doc') return base + '/uploads/employment/' + encodeURIComponent(v);
+        if (k === 'photo_path') return base + '/uploads/photos/' + encodeURIComponent(v);
+        return '';
+    }
+
+    function fileCellHtml(fieldKey, value) {
+        var v = (value === null || typeof value === 'undefined') ? '' : String(value);
+        v = v.trim();
+        if (!v) return '';
+        if (v === 'INSUFFICIENT_DOCUMENTS') return '<span class="badge bg-secondary">Insufficient</span>';
+
+        var href = fileUrlForField(fieldKey, v);
+        if (!href) return esc(v);
+
+        return '<a href="' + esc(href) + '" target="_blank" style="text-decoration:none; color:#2563eb; font-weight:600;">View</a>' +
+            '<div style="color:#64748b; font-size:12px; margin-top:2px;">' + esc(v) + '</div>';
+    }
+
+    function setBadge(id, kind, text) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        var k = String(kind || '').toLowerCase();
+        el.classList.remove('bg-success', 'bg-warning', 'bg-secondary', 'text-dark');
+        if (k === 'done') {
+            el.classList.add('bg-success');
+            el.textContent = text || '✔';
+            return;
+        }
+        if (k === 'wip') {
+            el.classList.add('bg-warning', 'text-dark');
+            el.textContent = text || 'WIP';
+            return;
+        }
+        el.classList.add('bg-secondary');
+        el.textContent = text || 'Pending';
+    }
+
+    function isFilled(v) {
+        return v != null && String(v).trim() !== '';
+    }
+
+    function getWorkflowStageLabel(d, componentKey) {
+        try {
+            componentKey = String(componentKey || '').toLowerCase().trim();
+            if (!componentKey) return '';
+
+            var list = Array.isArray(d && d.assigned_components) ? d.assigned_components : [];
+            for (var i = 0; i < list.length; i++) {
+                var r = list[i] || {};
+                var k = r.component_key ? String(r.component_key).toLowerCase().trim() : '';
+                if (k === componentKey) {
+                    return r.current_stage ? String(r.current_stage) : '';
+                }
+            }
+            return '';
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function setStageBadge(badgeId, stageLabel) {
+        stageLabel = String(stageLabel || '').trim();
+        if (!stageLabel) return false;
+
+        var low = stageLabel.toLowerCase();
+        if (low === 'completed') {
+            setBadge(badgeId, 'done', 'Done');
+            return true;
+        }
+        if (low.indexOf('pending') === 0) {
+            var shortTxt = stageLabel.replace(/^Pending\s*/i, 'Pending');
+            setBadge(badgeId, 'wip', shortTxt);
+            return true;
+        }
+
+        setBadge(badgeId, 'pending', stageLabel);
+        return true;
+    }
+
+    function updateSectionBadges(d) {
+        d = d || {};
+        var basic = d.basic || {};
+        var contact = d.contact || {};
+        var ref = d.reference || {};
+        var app = d.application || {};
+        var auth = d.authorization || {};
+
+        var identification = Array.isArray(d.identification) ? d.identification : [];
+        var education = Array.isArray(d.education) ? d.education : [];
+        var employment = Array.isArray(d.employment) ? d.employment : [];
+
+        var basicDone = isFilled(basic.first_name) || isFilled(basic.last_name) || isFilled(basic.dob);
+        var idDone = identification.length > 0;
+        var contactDone = isFilled(contact.address1) || isFilled(contact.permanent_address1) || isFilled(contact.city) || isFilled(contact.state);
+        var eduDone = education.length > 0;
+        var empDone = employment.length > 0;
+        var refDone = isFilled(ref.reference_name) || isFilled(ref.reference_mobile) || isFilled(ref.reference_email);
+        var reportsDone = isFilled(app.submitted_at) || isFilled(auth.file_name) || isFilled(auth.uploaded_at);
+
+        // Prefer workflow stage when available
+        var usedWorkflow = false;
+        usedWorkflow = setStageBadge('cvNavBadgeBasic', getWorkflowStageLabel(d, 'basic')) || usedWorkflow;
+        usedWorkflow = setStageBadge('cvNavBadgeId', getWorkflowStageLabel(d, 'id')) || usedWorkflow;
+        usedWorkflow = setStageBadge('cvNavBadgeContact', getWorkflowStageLabel(d, 'contact')) || usedWorkflow;
+        usedWorkflow = setStageBadge('cvNavBadgeEducation', getWorkflowStageLabel(d, 'education')) || usedWorkflow;
+        usedWorkflow = setStageBadge('cvNavBadgeEmployment', getWorkflowStageLabel(d, 'employment')) || usedWorkflow;
+        usedWorkflow = setStageBadge('cvNavBadgeReference', getWorkflowStageLabel(d, 'reference')) || usedWorkflow;
+
+        if (!usedWorkflow) {
+            setBadge('cvNavBadgeBasic', basicDone ? 'done' : 'pending');
+            setBadge('cvNavBadgeId', idDone ? 'done' : 'pending');
+            setBadge('cvNavBadgeContact', contactDone ? 'done' : 'pending');
+            setBadge('cvNavBadgeEducation', eduDone ? 'done' : 'pending');
+            setBadge('cvNavBadgeEmployment', empDone ? 'done' : 'pending');
+            setBadge('cvNavBadgeReference', refDone ? 'done' : 'pending');
+        }
+
+        setBadge('cvNavBadgeReports', reportsDone ? 'done' : 'pending');
+    }
+
+    function setVal(id, value) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        el.value = (value === null || typeof value === 'undefined') ? '' : String(value);
+    }
+
+    function setFileField(id, fieldKey, value) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        var v = (value === null || typeof value === 'undefined') ? '' : String(value);
+        v = v.trim();
+
+        var href = fileUrlForField(fieldKey, v);
+        if (href) {
+            var wrap = document.createElement('div');
+            wrap.style.display = 'flex';
+            wrap.style.alignItems = 'center';
+            wrap.style.gap = '10px';
+
+            var a = document.createElement('a');
+            a.href = href;
+            a.target = '_blank';
+            a.rel = 'noopener';
+            a.textContent = 'View';
+            a.style.textDecoration = 'none';
+            a.style.color = '#2563eb';
+            a.style.fontWeight = '700';
+
+            var small = document.createElement('div');
+            small.textContent = v;
+            small.style.color = '#64748b';
+            small.style.fontSize = '12px';
+            small.style.overflow = 'hidden';
+            small.style.textOverflow = 'ellipsis';
+            small.style.whiteSpace = 'nowrap';
+
+            wrap.appendChild(a);
+            wrap.appendChild(small);
+
+            el.value = '';
+            el.style.display = 'none';
+            el.insertAdjacentElement('afterend', wrap);
+            return;
+        }
+
+        el.value = v;
+    }
+
+    function simplifyReadonlyField(id) {
+        var role = getRole();
+        var isPrint = String(qs('print') || '') === '1';
+        if (isPrint) return;
+        if (!(role === 'verifier' || role === 'validator' || role === 'db_verifier')) return;
+
+        var el = document.getElementById(id);
+        if (!el) return;
+        if (el.dataset.simpleDone) return;
+
+        var tag = String(el.tagName || '').toLowerCase();
+        if (!(tag === 'input' || tag === 'select' || tag === 'textarea')) return;
+
+        var value = '';
+        try {
+            if (tag === 'select') {
+                var opt = el.options && el.selectedIndex >= 0 ? el.options[el.selectedIndex] : null;
+                value = opt ? String(opt.textContent || opt.value || '') : String(el.value || '');
+            } else {
+                value = String(el.value || '');
+            }
+        } catch (_e) {
+            value = String(el.value || '');
+        }
+        value = value.trim();
+
+        var textEl = document.createElement('div');
+        textEl.textContent = value || '-';
+        textEl.style.padding = '6px 0';
+        textEl.style.fontWeight = '800';
+        textEl.style.color = '#0f172a';
+
+        el.style.display = 'none';
+        el.insertAdjacentElement('afterend', textEl);
+        el.dataset.simpleDone = '1';
+    }
+
+    function simplifyAllReadonlyFields() {
+        var role = getRole();
+        if (!(role === 'verifier' || role === 'validator' || role === 'db_verifier')) return;
+        var isPrint = String(qs('print') || '') === '1';
+        if (isPrint) return;
+
+        [
+            'cv_basic_first_name',
+            'cv_basic_last_name',
+            'cv_basic_dob',
+            'cv_basic_mobile',
+            'cv_basic_email',
+            'cv_basic_gender',
+            'cv_basic_father_name',
+            'cv_basic_mother_name',
+            'cv_basic_country',
+            'cv_basic_state',
+            'cv_basic_nationality',
+            'cv_basic_marital_status',
+
+            'cv_contact_current_address',
+            'cv_contact_permanent_address',
+            'cv_contact_proof_type',
+
+            'cv_reference_name',
+            'cv_reference_designation',
+            'cv_reference_company',
+            'cv_reference_mobile',
+            'cv_reference_email',
+            'cv_reference_relationship',
+            'cv_reference_years_known',
+
+            'cv_app_submitted_at',
+            'cv_auth_signature',
+            'cv_auth_file_name',
+            'cv_auth_uploaded_at'
+        ].forEach(function (id) {
+            simplifyReadonlyField(id);
+        });
+    }
+
+    function setText(id, value) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = (value === null || typeof value === 'undefined') ? '' : String(value);
+    }
+
+    function ymd(dt) {
+        try {
+            if (!(dt instanceof Date) || isNaN(dt.getTime())) return '';
+            var y = dt.getFullYear();
+            var m = String(dt.getMonth() + 1).padStart(2, '0');
+            var d = String(dt.getDate()).padStart(2, '0');
+            return y + '-' + m + '-' + d;
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function isWeekend(dt) {
+        try {
+            var day = dt.getDay();
+            return day === 0 || day === 6;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function businessDaysPassed(startDt, endDt, weekendRules) {
+        if (!startDt || !endDt) return 0;
+        var include = String(weekendRules || '').toLowerCase().trim() === 'include';
+        if (include) {
+            var ms = endDt.getTime() - startDt.getTime();
+            var daysPassed = Math.floor(ms / 86400000);
+            return isFinite(daysPassed) ? Math.max(0, daysPassed) : 0;
+        }
+
+        var s = new Date(startDt.getFullYear(), startDt.getMonth(), startDt.getDate());
+        var e = new Date(endDt.getFullYear(), endDt.getMonth(), endDt.getDate());
+        if (e.getTime() < s.getTime()) return 0;
+
+        var count = 0;
+        var cur = new Date(s.getTime());
+        cur.setDate(cur.getDate() + 1);
+        while (cur.getTime() <= e.getTime()) {
+            var key = ymd(cur);
+            var isHol = !!(key && HOLIDAY_SET[key]);
+            if (!isWeekend(cur) && !isHol) count++;
+            cur.setDate(cur.getDate() + 1);
+        }
+        return count;
+    }
+
+    function loadHolidaysOnce() {
+        if (HOLIDAYS_LOADED) return Promise.resolve();
+        var base = (window.APP_BASE_URL || '').replace(/\/$/, '');
+        var url = base + '/api/gssadmin/holidays_list.php';
+        return fetch(url, { credentials: 'same-origin' })
+            .then(function (res) { return res.json(); })
+            .then(function (data) {
+                HOLIDAYS_LOADED = true;
+                HOLIDAY_SET = {};
+                if (!data || data.status !== 1 || !Array.isArray(data.data)) return;
+                data.data.forEach(function (h) {
+                    var d = h && h.holiday_date ? String(h.holiday_date).slice(0, 10) : '';
+                    var on = h && typeof h.is_active !== 'undefined' ? (parseInt(h.is_active || '1', 10) || 1) : 1;
+                    if (d && on === 1) HOLIDAY_SET[d] = true;
+                });
+            })
+            .catch(function () {
+                HOLIDAYS_LOADED = true;
+                HOLIDAY_SET = {};
+            });
+    }
+
+    function tatLabelFromCreated(createdAt, tatDays) {
+        var weekendRules = 'exclude';
+        if (tatDays && typeof tatDays === 'object') {
+            weekendRules = tatDays.weekend_rules || 'exclude';
+            tatDays = parseInt(tatDays.internal_tat || '20', 10) || 20;
+        } else {
+            tatDays = parseInt(tatDays, 10);
+            if (!isFinite(tatDays) || tatDays <= 0) tatDays = 20;
+        }
+
+        var dt = null;
+        try {
+            dt = createdAt ? new Date(createdAt) : null;
+            if (!dt || isNaN(dt.getTime())) dt = null;
+        } catch (e) {
+            dt = null;
+        }
+
+        if (!dt) return '-';
+        var now = new Date();
+        var daysPassed = businessDaysPassed(dt, now, weekendRules);
+        var remaining = tatDays - daysPassed;
+        if (remaining >= 0) return remaining + ' day(s) remaining';
+        return 'Overdue ' + Math.abs(remaining) + ' day(s)';
+    }
+
+    function renderTable(hostId, rows, columns) {
+        var host = document.getElementById(hostId);
+        if (!host) return;
+
+        if (!Array.isArray(rows) || rows.length === 0) {
+            host.innerHTML = '<div style="color:#6b7280; font-size:13px;">No data.</div>';
+            return;
+        }
+
+        rows = rows.map(window.GSS_DATE.formatRowDates);
+
+        var role = getRole();
+        var isPrint = String(qs('print') || '') === '1';
+        var useSimple = !isPrint && (role === 'verifier' || role === 'validator' || role === 'db_verifier');
+        if (useSimple) {
+            var html = rows.map(function (r, idx) {
+                var body = columns.map(function (c) {
+                    var key = c && c.key ? String(c.key) : '';
+                    var label = c && c.label ? String(c.label) : key;
+                    var v = r ? r[key] : '';
+                    var href = fileUrlForField(key, v);
+                    var valHtml = href ? fileCellHtml(key, v) : ('<span style="font-weight:800; color:#0f172a;">' + esc(v) + '</span>');
+                    return '<div style="display:grid; grid-template-columns: 200px 1fr; gap:12px; padding:8px 0; border-bottom:1px solid rgba(148,163,184,0.18);">' +
+                        '<div style="font-size:11px; font-weight:900; color:#475569;">' + esc(label) + '</div>' +
+                        '<div style="font-size:13px;">' + valHtml + '</div>' +
+                    '</div>';
+                }).join('');
+
+                return '<div style="border:1px solid rgba(148,163,184,0.22); border-radius:10px; padding:10px; background:#fff; margin-bottom:10px;">' +
+                    '<div style="font-size:12px; font-weight:950; color:#0f172a; margin-bottom:6px;">Item ' + esc(String(idx + 1)) + '</div>' +
+                    '<div>' + body + '</div>' +
+                '</div>';
+            }).join('');
+
+            host.innerHTML = html;
+            return;
+        }
+
+        var thead = '<tr>' + columns.map(function (c) { return '<th>' + esc(c.label) + '</th>'; }).join('') + '</tr>';
+        var tbody = rows.map(function (r) {
+            return '<tr>' + columns.map(function (c) {
+                var v = r ? r[c.key] : '';
+                var key = c && c.key ? String(c.key) : '';
+                var href = fileUrlForField(key, v);
+                if (href) return '<td>' + fileCellHtml(key, v) + '</td>';
+                return '<td>' + esc(v) + '</td>';
+            }).join('') + '</tr>';
+        }).join('');
+
+        host.innerHTML = '<div class="table-scroll"><table class="table"><thead>' + thead + '</thead><tbody>' + tbody + '</tbody></table></div>';
+    }
+
+    function toTitle(key) {
+        var s = String(key || '');
+        if (!s) return '';
+        return s
+            .replace(/_/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .replace(/\b\w/g, function (m) { return m.toUpperCase(); });
+    }
+
+    function isPlainObject(v) {
+        return v && typeof v === 'object' && !Array.isArray(v);
+    }
+
+    function renderKeyValue(hostId, title, obj) {
+        var host = document.getElementById(hostId);
+        if (!host) return;
+        if (!isPlainObject(obj)) return;
+
+        var keys = Object.keys(obj);
+        if (!keys.length) return;
+
+        var rows = keys.map(function (k) {
+            var v = obj[k];
+            if (v === null || typeof v === 'undefined') v = '';
+            if (typeof v === 'object') {
+                try { v = JSON.stringify(v); } catch (_e) { v = String(v); }
+            }
+            return '<tr><th style="width:240px;">' + esc(toTitle(k)) + '</th><td>' + esc(String(v)) + '</td></tr>';
+        }).join('');
+
+        host.insertAdjacentHTML('beforeend',
+            '<div style="margin-bottom:12px;">' +
+                '<div style="font-weight:700; margin:6px 0; font-size:13px;">' + esc(title) + '</div>' +
+                '<div class="table-scroll"><table class="table"><tbody>' + rows + '</tbody></table></div>' +
+            '</div>'
+        );
+    }
+
+    function renderArray(hostId, title, list) {
+        var host = document.getElementById(hostId);
+        if (!host) return;
+        if (!Array.isArray(list) || !list.length) return;
+
+        var keys = [];
+        list.forEach(function (row) {
+            if (!isPlainObject(row)) return;
+            Object.keys(row).forEach(function (k) {
+                if (keys.indexOf(k) === -1) keys.push(k);
+            });
+        });
+
+        if (!keys.length) return;
+
+        var thead = '<tr>' + keys.map(function (k) { return '<th>' + esc(toTitle(k)) + '</th>'; }).join('') + '</tr>';
+        var tbody = list.map(function (row) {
+            return '<tr>' + keys.map(function (k) {
+                var v = row && typeof row === 'object' ? row[k] : '';
+                if (v === null || typeof v === 'undefined') v = '';
+                if (typeof v === 'object') {
+                    try { v = JSON.stringify(v); } catch (_e) { v = String(v); }
+                }
+                return '<td>' + esc(String(v)) + '</td>';
+            }).join('') + '</tr>';
+        }).join('');
+
+        host.insertAdjacentHTML('beforeend',
+            '<div style="margin-bottom:12px;">' +
+                '<div style="font-weight:700; margin:6px 0; font-size:13px;">' + esc(title) + '</div>' +
+                '<div class="table-scroll"><table class="table"><thead>' + thead + '</thead><tbody>' + tbody + '</tbody></table></div>' +
+            '</div>'
+        );
+    }
+
+    function renderDocsForPrint(hostId, rows) {
+        var host = document.getElementById(hostId);
+        if (!host) return;
+
+        if (!Array.isArray(rows) || rows.length === 0) {
+            host.innerHTML = '<div style="color:#6b7280; font-size:13px;">No uploaded documents.</div>';
+            return;
+        }
+
+        rows = rows.map(formatRowDates);
+
+        var base = (window.APP_BASE_URL || '').replace(/\/$/, '');
+
+        host.innerHTML = '<div class="table-scroll"><table class="table">' +
+            '<thead><tr><th>Type</th><th>File</th><th>Uploaded By</th><th>Created</th></tr></thead>' +
+            '<tbody>' + rows.map(function (r) {
+                var href = r && r.file_path ? (base + String(r.file_path)) : '#';
+                var label = (r && (r.original_name || r.file_path)) ? String(r.original_name || r.file_path) : '';
+                return '<tr>' +
+                    '<td>' + esc(r.doc_type || '') + '</td>' +
+                    '<td><a href="' + esc(href) + '" target="_blank" style="text-decoration:none; color:#2563eb;">' + esc(label) + '</a></td>' +
+                    '<td>' + esc(r.uploaded_by_role || '') + '</td>' +
+                    '<td>' + esc(r.created_at || '') + '</td>' +
+                '</tr>';
+            }).join('') +
+            '</tbody></table></div>';
+    }
+
+    function setHtml(id, html) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        el.innerHTML = html || '';
+    }
+
+    function kvBox(label, value) {
+        return '<div class="cr-pdf-kv"><div class="k">' + esc(label) + '</div><div class="v">' + esc(value) + '</div></div>';
+    }
+
+    function computeExecutiveSummary(d) {
+        var sections = [
+            { key: 'basic', label: 'Basic Details' },
+            { key: 'identification', label: 'Identification' },
+            { key: 'contact', label: 'Contact Information' },
+            { key: 'education', label: 'Education Details' },
+            { key: 'employment', label: 'Employment Details' },
+            { key: 'reference', label: 'Reference' },
+            { key: 'authorization', label: 'Authorization' },
+            { key: 'docs', label: 'Uploaded Documents' }
+        ];
+
+        function statusFor(key) {
+            if (key === 'docs') {
+                var docs = d.uploaded_docs || [];
+                return (Array.isArray(docs) && docs.length) ? 'Available' : 'Not Available';
+            }
+            var v = d[key];
+            if (Array.isArray(v)) return v.length ? 'Available' : 'Not Available';
+            if (v && typeof v === 'object') return Object.keys(v).length ? 'Available' : 'Not Available';
+            return v ? 'Available' : 'Not Available';
+        }
+
+        return sections.map(function (s) {
+            return { section: s.label, status: statusFor(s.key) };
+        });
+    }
+
+    function renderExecutive(hostId, d) {
+        var host = document.getElementById(hostId);
+        if (!host) return;
+
+        var rows = computeExecutiveSummary(d);
+        var thead = '<tr><th>Section</th><th>Status</th></tr>';
+        var tbody = rows.map(function (r) {
+            return '<tr><td>' + esc(r.section) + '</td><td>' + esc(r.status) + '</td></tr>';
+        }).join('');
+        host.innerHTML = '<div class="table-scroll"><table class="table"><thead>' + thead + '</thead><tbody>' + tbody + '</tbody></table></div>';
+    }
+
+    function renderChecklist(hostId, docs) {
+        var host = document.getElementById(hostId);
+        if (!host) return;
+
+        var rows = Array.isArray(docs) ? docs.slice() : [];
+        if (!rows.length) {
+            host.innerHTML = '<div style="color:#6b7280; font-size:13px;">No documents uploaded.</div>';
+            return;
+        }
+
+        var thead = '<tr><th>Document Type</th><th>File</th><th>Uploaded By</th><th>Created</th></tr>';
+        var base = (window.APP_BASE_URL || '').replace(/\/$/, '');
+        var tbody = rows.map(function (r) {
+            var href = r && r.file_path ? (base + String(r.file_path)) : '#';
+            var label = (r && (r.original_name || r.file_path)) ? String(r.original_name || r.file_path) : '';
+            return '<tr>' +
+                '<td>' + esc(r.doc_type || '') + '</td>' +
+                '<td><a href="' + esc(href) + '" target="_blank" style="text-decoration:none; color:#2563eb;">' + esc(label) + '</a></td>' +
+                '<td>' + esc(r.uploaded_by_role || '') + '</td>' +
+                '<td>' + esc(r.created_at || '') + '</td>' +
+            '</tr>';
+        }).join('');
+        host.innerHTML = '<div class="table-scroll"><table class="table"><thead>' + thead + '</thead><tbody>' + tbody + '</tbody></table></div>';
+    }
+
+    function isImageMime(m) {
+        var v = String(m || '').toLowerCase();
+        return v.indexOf('image/') === 0;
+    }
+
+    function renderDocsGrouped(hostId, rows) {
+        var host = document.getElementById(hostId);
+        if (!host) return;
+
+        var list = Array.isArray(rows) ? rows : [];
+        if (!list.length) {
+            host.innerHTML = '<div style="color:#6b7280; font-size:13px;">No uploaded documents.</div>';
+            return;
+        }
+
+        list = list.map(window.GSS_DATE.formatRowDates);
+
+        var base = (window.APP_BASE_URL || '').replace(/\/$/, '');
+        host.innerHTML = list.map(function (r) {
+            var href = r && r.file_path ? (base + String(r.file_path)) : '#';
+            var label = (r && (r.original_name || r.file_path)) ? String(r.original_name || r.file_path) : '';
+            var by = (r && r.uploaded_by_role) ? String(r.uploaded_by_role) : '';
+            var dt = (r && r.doc_type) ? String(r.doc_type) : '';
+            var created = (r && r.created_at) ? String(r.created_at) : '';
+            var thumb = '';
+            if (href !== '#' && isImageMime(r && r.mime_type)) {
+                thumb = '<div class="cr-pdf-thumb"><img src="' + esc(href) + '" alt="' + esc(label) + '"></div>';
+            }
+            return '<div class="cr-pdf-doc">' +
+                '<h4>' + esc(dt || 'Document') + '</h4>' +
+                '<small><b>File:</b> <a href="' + esc(href) + '" target="_blank" style="text-decoration:none; color:#2563eb;">' + esc(label) + '</a></small>' +
+                '<small><b>Uploaded By:</b> ' + esc(by) + '</small>' +
+                '<small><b>Created:</b> ' + esc(created) + '</small>' +
+                thumb +
+            '</div>';
+        }).join('');
+    }
+
+    function setBoxMessage(id, text, type) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = text || '';
+        el.className = type ? ('alert alert-' + type) : '';
+        el.style.display = text ? 'block' : 'none';
+    }
+
+    async function postJson(url, body) {
+        var res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify(body || {})
+        });
+        var payload = await res.json().catch(function () { return null; });
+        return { res: res, payload: payload };
+    }
+
+    function setActionsDisabled(disabled) {
+        ['cvActionHold', 'cvActionReject', 'cvActionStopBgv', 'cvActionApprove'].forEach(function (id) {
+            var b = document.getElementById(id);
+            if (!b) return;
+            b.disabled = !!disabled;
+        });
+    }
+
+    function initCaseActions(applicationId) {
+        var base = (window.APP_BASE_URL || '').replace(/\/$/, '');
+        var url = base + '/api/shared/case_action.php';
+        var compUrl = base + '/api/shared/component_action.php';
+
+        function roleToStage(role) {
+            role = String(role || '').toLowerCase().trim();
+            if (role === 'validator') return 'validator';
+            if (role === 'qa' || role === 'team_lead') return 'qa';
+            if (role === 'verifier' || role === 'db_verifier') return 'verifier';
+            return role;
+        }
+
+        function getAssignedRowForComponent(d, componentKey) {
+            try {
+                componentKey = String(componentKey || '').toLowerCase().trim();
+                if (!componentKey) return null;
+                var list = Array.isArray(d && d.assigned_components) ? d.assigned_components : [];
+                for (var i = 0; i < list.length; i++) {
+                    var r = list[i] || {};
+                    var k = r.component_key ? String(r.component_key).toLowerCase().trim() : '';
+                    if (k === componentKey) return r;
+                }
+                return null;
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function getStageStatusFor(componentKey, stage) {
+            try {
+                var r = getAssignedRowForComponent(REPORT_PAYLOAD || {}, componentKey);
+                if (r && r.workflow && typeof r.workflow === 'object') {
+                    return String(r.workflow[stage] || '').toLowerCase().trim();
+                }
+                return '';
+            } catch (e) {
+                return '';
+            }
+        }
+
+        function setComponentActionButtonsEnabled(enabled) {
+            ['cvActionHold', 'cvActionReject', 'cvActionApprove'].forEach(function (id) {
+                var b = document.getElementById(id);
+                if (!b) return;
+                b.disabled = !enabled;
+            });
+        }
+
+        function applyComponentActionLock() {
+            try {
+                var role = getRole();
+                var stage = roleToStage(role);
+                if (!(stage === 'validator' || stage === 'verifier' || stage === 'qa')) {
+                    return;
+                }
+
+                var componentKey = currentSectionKey();
+                if (!componentKey || componentKey === 'timeline') return;
+
+                var st = getStageStatusFor(componentKey, stage);
+                if (st === 'approved' || st === 'rejected') {
+                    setComponentActionButtonsEnabled(false);
+                    setText('cvTopMessage', 'This component is already ' + st + ' for ' + stage + '.');
+                } else {
+                    setComponentActionButtonsEnabled(true);
+                }
+            } catch (_e) {
+            }
+        }
+
+        function currentSectionKey() {
+            var active = document.querySelector('.list-group-item[data-section].active');
+            var sec = active ? (active.getAttribute('data-section') || '') : '';
+            sec = String(sec || '').toLowerCase().trim();
+            if (!sec) {
+                var activePanel = document.querySelector('.candidate-section.cr-active');
+                if (activePanel && activePanel.id) {
+                    sec = String(activePanel.id).replace(/^section-/, '').toLowerCase().trim();
+                }
+            }
+            return sec;
+        }
+
+        async function run(action, label) {
+            if (!applicationId) return;
+
+            if (window.GSSDialog && typeof window.GSSDialog.confirm === 'function') {
+                var ok = await window.GSSDialog.confirm('Confirm: ' + label + '?', { title: 'Confirm action', okText: 'Yes', cancelText: 'No', okVariant: 'danger' });
+                if (!ok) return;
+            } else {
+                if (!window.confirm('Confirm: ' + label + '?')) {
+                    return;
+                }
+            }
+
+            setActionsDisabled(true);
+            setText('cvTopMessage', '');
+
+            try {
+                var caseId = REPORT_PAYLOAD && REPORT_PAYLOAD.case && REPORT_PAYLOAD.case.case_id ? parseInt(REPORT_PAYLOAD.case.case_id, 10) : 0;
+
+                var role = getRole();
+                var isComponentRole = (role === 'verifier' || role === 'validator' || role === 'db_verifier' || role === 'qa' || role === 'team_lead');
+
+                var out;
+                if (isComponentRole && (action === 'hold' || action === 'reject' || action === 'approve')) {
+                    var componentKey = currentSectionKey();
+                    if (!componentKey || componentKey === 'timeline') {
+                        setText('cvTopMessage', 'Please select a component first.');
+                        return;
+                    }
+
+                    var group2 = null;
+                    if (role === 'verifier') {
+                        group2 = getVerifierGroup() || null;
+                    }
+                    out = await postJson(compUrl, {
+                        application_id: applicationId,
+                        case_id: caseId || null,
+                        component_key: componentKey,
+                        action: action,
+                        group: group2
+                    });
+                } else {
+                    var group = getVerifierGroup();
+                    out = await postJson(url, {
+                        application_id: applicationId,
+                        action: action,
+                        case_id: caseId || null,
+                        group: group || null
+                    });
+                }
+                if (!out.res.ok || !out.payload || out.payload.status !== 1) {
+                    var msg = (out.payload && out.payload.message) ? out.payload.message : 'Action failed.';
+                    setText('cvTopMessage', msg);
+                    return;
+                }
+
+                var d = out.payload.data || {};
+                var statusLabel = d.application_status || d.case_status || '';
+                if (statusLabel) {
+                    setText('cvHeaderStatus', statusLabel);
+                }
+
+                // Update local workflow state so buttons lock immediately without reload
+                if (isComponentRole && (action === 'hold' || action === 'reject' || action === 'approve')) {
+                    var componentKey2 = currentSectionKey();
+                    var stage2 = roleToStage(role);
+                    var row2 = getAssignedRowForComponent(REPORT_PAYLOAD || {}, componentKey2);
+                    if (row2) {
+                        if (!row2.workflow || typeof row2.workflow !== 'object') row2.workflow = {};
+                        row2.workflow[stage2] = (action === 'approve') ? 'approved' : ((action === 'reject') ? 'rejected' : 'hold');
+                    }
+                    try {
+                        updateSectionBadges(REPORT_PAYLOAD || {});
+                    } catch (_e) {
+                    }
+                    applyComponentActionLock();
+                }
+                setText('cvTopMessage', 'Updated successfully.');
+            } catch (e) {
+                setText('cvTopMessage', (e && e.message) ? e.message : 'Action failed.');
+            } finally {
+                setActionsDisabled(false);
+            }
+        }
+
+        // expose for per-component toolbars
+        window.__CR_RUN_ACTION = run;
+
+        var holdBtn = document.getElementById('cvActionHold');
+        var rejectBtn = document.getElementById('cvActionReject');
+        var stopBtn = document.getElementById('cvActionStopBgv');
+        var approveBtn = document.getElementById('cvActionApprove');
+
+        if (holdBtn && !holdBtn.dataset.bound) {
+            holdBtn.dataset.bound = '1';
+            holdBtn.addEventListener('click', function () { run('hold', 'Hold'); });
+        }
+        if (rejectBtn && !rejectBtn.dataset.bound) {
+            rejectBtn.dataset.bound = '1';
+            rejectBtn.addEventListener('click', function () { run('reject', 'Reject'); });
+        }
+        if (stopBtn && !stopBtn.dataset.bound) {
+            stopBtn.dataset.bound = '1';
+            stopBtn.addEventListener('click', function () { run('stop_bgv', 'Stop BGV'); });
+        }
+        if (approveBtn && !approveBtn.dataset.bound) {
+            approveBtn.dataset.bound = '1';
+            approveBtn.addEventListener('click', function () { run('approve', 'Approve'); });
+        }
+
+        // Initial lock based on current component + stage status
+        applyComponentActionLock();
+    }
+
+    function initSectionNav() {
+        var items = Array.prototype.slice.call(document.querySelectorAll('.list-group-item[data-section]'));
+        if (!items.length) return;
+
+        var role = getRole();
+        var assignedKeys = [];
+        if ((role === 'verifier' || role === 'validator' || role === 'db_verifier') && REPORT_PAYLOAD) {
+            assignedKeys = getAssignedComponentKeys(REPORT_PAYLOAD);
+
+            // Hide nav items and panels not assigned
+            if (assignedKeys.length) {
+                items.forEach(function (btn) {
+                    var s = (btn.getAttribute('data-section') || '').toLowerCase();
+                    var ok = assignedKeys.indexOf(s) !== -1 || s === 'timeline';
+                    btn.style.display = ok ? '' : 'none';
+                });
+
+                var panelsAll = Array.prototype.slice.call(document.querySelectorAll('.candidate-section'));
+                panelsAll.forEach(function (p) {
+                    var id = (p && p.id) ? String(p.id) : '';
+                    var section = id.replace(/^section-/, '').toLowerCase();
+                    var ok = assignedKeys.indexOf(section) !== -1 || section === 'timeline';
+                    if (!ok) {
+                        p.style.display = 'none';
+                        p.classList.remove('cr-active');
+                    }
+                });
+            }
+        }
+
+        var uploadTypeEl = document.getElementById('cvUploadDocType');
+        var currentSection = null;
+
+        function syncUploadType(section) {
+            if (!uploadTypeEl) return;
+            var v = String(section || 'general');
+            var supported = Array.prototype.slice.call(uploadTypeEl.options).some(function (o) { return String(o.value) === v; });
+            uploadTypeEl.value = supported ? v : 'general';
+        }
+
+        function show(section) {
+            section = String(section || '').toLowerCase();
+            if (!section) return;
+
+            if (section === 'timeline') {
+                openBsModal('cvTimelineModal');
+                return;
+            }
+
+            syncUploadType(section);
+            setMiniTimelineFilter(section);
+            items.forEach(function (btn) {
+                btn.classList.toggle('active', btn.getAttribute('data-section') === section);
+            });
+
+            var panels = Array.prototype.slice.call(document.querySelectorAll('.candidate-section'));
+            panels.forEach(function (p) {
+                var id = (p.id || '').replace(/^section-/, '').toLowerCase();
+                var on = id === section;
+                p.style.display = on ? '' : 'none';
+                p.classList.toggle('cr-active', on);
+            });
+
+            setCompNavActive(section);
+            ensureComponentToolbar(section);
+
+            try {
+                var panel = document.getElementById('section-' + String(section));
+                ensureComponentChat(panel, section);
+            } catch (_e) {
+            }
+
+            try {
+                renderRemarksPanel(section);
+            } catch (_e) {
+            }
+        }
+
+        items.forEach(function (btn) {
+            if (!btn.dataset.boundNav) {
+                btn.dataset.boundNav = '1';
+                btn.addEventListener('click', function () {
+                    var target = btn.getAttribute('data-section');
+                    if (!target) return;
+                    show(target);
+                });
+            }
+        });
+
+        // Hide sidebar items for disallowed sections
+        var allowSet = allowedSectionsSet();
+        items.forEach(function (btn) {
+            var s = String(btn.getAttribute('data-section') || '').toLowerCase();
+            if (s && s !== 'timeline' && !canSeeSection(s, allowSet)) {
+                btn.style.display = 'none';
+            }
+            if (s === 'timeline' && !canSeeSection('timeline', allowSet)) {
+                btn.style.display = 'none';
+            }
+        });
+
+        var active = items.find(function (b) { return b.classList.contains('active') && b.style.display !== 'none'; });
+        var initial = active ? active.getAttribute('data-section') : 'basic';
+        if (!canSeeSection(initial, allowSet)) {
+            var firstVisible = items.find(function (b) { return b.style.display !== 'none'; });
+            initial = firstVisible ? firstVisible.getAttribute('data-section') : '';
+        }
+        if (assignedKeys && assignedKeys.length) {
+            initial = assignedKeys[0] || initial;
+        }
+
+        if (initial) show(initial);
+    }
+
+    function initVerifierCompleteNext(getPayload) {
+        var btn = document.getElementById('cvCompleteGroupBtn');
+        if (!btn) return;
+
+        var role = getRole();
+        if (role === 'validator') {
+            btn.addEventListener('click', function () {
+                var payload = getPayload ? getPayload() : null;
+                var caseId = payload && payload.case && payload.case.case_id ? parseInt(payload.case.case_id, 10) : 0;
+                var clientId = payload && payload.case && payload.case.client_id ? parseInt(payload.case.client_id, 10) : 0;
+
+                if (!caseId) {
+                    var msg = document.getElementById('cvTopMessage');
+                    if (msg) msg.textContent = 'Case ID not found.';
+                    return;
+                }
+
+                btn.disabled = true;
+                var base = (window.APP_BASE_URL || '').replace(/\/$/, '');
+
+                fetch(base + '/api/validator/queue_complete.php', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ case_id: caseId })
+                })
+                    .then(function (res) {
+                        return res.json().catch(function () { return { status: 0, message: 'Invalid server response.' }; });
+                    })
+                    .then(function (data) {
+                        if (!data || data.status !== 1) {
+                            var msg = document.getElementById('cvTopMessage');
+                            if (msg) msg.textContent = (data && data.message) ? data.message : 'Failed to complete.';
+                            return;
+                        }
+
+                        return fetch(base + '/api/validator/queue_next.php', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            credentials: 'same-origin',
+                            body: JSON.stringify({ client_id: clientId })
+                        })
+                            .then(function (res) {
+                                return res.json().catch(function () { return { status: 0, message: 'Invalid server response.' }; });
+                            })
+                            .then(function (nextData) {
+                                if (!nextData || nextData.status !== 1) {
+                                    var msg = document.getElementById('cvTopMessage');
+                                    if (msg) msg.textContent = (nextData && nextData.message) ? nextData.message : 'Completed. No next case.';
+                                    return;
+                                }
+                                var url = nextData && nextData.data ? nextData.data.url : null;
+                                if (!url) {
+                                    window.location.href = (window.APP_BASE_URL || '') + '/modules/validator/dashboard.php';
+                                    return;
+                                }
+                                window.location.href = url;
+                            });
+                    })
+                    .catch(function () {
+                        var msg = document.getElementById('cvTopMessage');
+                        if (msg) msg.textContent = 'Network error. Please try again.';
+                    })
+                    .finally(function () {
+                        btn.disabled = false;
+                    });
+            });
+            return;
+        }
+
+        var group = getVerifierGroup();
+        if (!group) {
+            btn.style.display = 'none';
+            return;
+        }
+
+        btn.addEventListener('click', function () {
+            var payload = getPayload ? getPayload() : null;
+            var caseId = payload && payload.case && payload.case.case_id ? parseInt(payload.case.case_id, 10) : 0;
+            var clientId = payload && payload.case && payload.case.client_id ? parseInt(payload.case.client_id, 10) : 0;
+
+            if (!caseId) {
+                var msg = document.getElementById('cvTopMessage');
+                if (msg) msg.textContent = 'Case ID not found.';
+                return;
+            }
+
+            btn.disabled = true;
+            var base = (window.APP_BASE_URL || '').replace(/\/$/, '');
+
+            fetch(base + '/api/verifier/queue_complete.php', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ case_id: caseId, group: group })
+            })
+                .then(function (res) {
+                    return res.json().catch(function () { return { status: 0, message: 'Invalid server response.' }; });
+                })
+                .then(function (data) {
+                    if (!data || data.status !== 1) {
+                        var msg = document.getElementById('cvTopMessage');
+                        if (msg) msg.textContent = (data && data.message) ? data.message : 'Failed to complete.';
+                        return;
+                    }
+
+                    return fetch(base + '/api/verifier/queue_next.php', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        credentials: 'same-origin',
+                        body: JSON.stringify({ group: group, client_id: clientId })
+                    })
+                        .then(function (res) {
+                            return res.json().catch(function () { return { status: 0, message: 'Invalid server response.' }; });
+                        })
+                        .then(function (nextData) {
+                            if (!nextData || nextData.status !== 1) {
+                                var msg = document.getElementById('cvTopMessage');
+                                if (msg) msg.textContent = (nextData && nextData.message) ? nextData.message : 'Completed. No next case.';
+                                return;
+                            }
+                            var url = nextData && nextData.data ? nextData.data.url : null;
+                            if (!url) {
+                                window.location.href = (window.APP_BASE_URL || '') + '/modules/verifier/dashboard.php';
+                                return;
+                            }
+                            window.location.href = url;
+                        });
+                })
+                .catch(function () {
+                    var msg = document.getElementById('cvTopMessage');
+                    if (msg) msg.textContent = 'Network error. Please try again.';
+                })
+                .finally(function () {
+                    btn.disabled = false;
+                });
+        });
+    }
+
+    function renderUploadedDocs(rows) {
+        var host = document.getElementById('cvUploadedDocs');
+        if (!host) return;
+
+        if (!Array.isArray(rows) || rows.length === 0) {
+            host.innerHTML = '<div style="color:#6b7280; font-size:13px;">No uploaded documents.</div>';
+            return;
+        }
+
+        var base = (window.APP_BASE_URL || '').replace(/\/$/, '');
+
+        host.innerHTML = '<div class="table-scroll"><table class="table">' +
+            '<thead><tr><th>Type</th><th>File</th><th>Uploaded By</th><th>Created</th></tr></thead>' +
+            '<tbody>' + rows.map(function (r) {
+                var href = r && r.file_path ? (base + String(r.file_path)) : '#';
+                var label = (r && (r.original_name || r.file_path)) ? String(r.original_name || r.file_path) : '';
+                return '<tr>' +
+                    '<td>' + esc(r.doc_type || '') + '</td>' +
+                    '<td><a href="' + esc(href) + '" target="_blank" style="text-decoration:none; color:#2563eb;">' + esc(label) + '</a></td>' +
+                    '<td>' + esc(r.uploaded_by_role || '') + '</td>' +
+                    '<td>' + esc(r.created_at || '') + '</td>' +
+                '</tr>';
+            }).join('') +
+            '</tbody></table></div>';
+    }
+
+    async function loadUploadedDocs(applicationId, docType) {
+        var base = (window.APP_BASE_URL || '').replace(/\/$/, '');
+        var url = base + '/api/shared/verification_docs_list.php?application_id=' + encodeURIComponent(applicationId);
+        if (docType) url += '&doc_type=' + encodeURIComponent(docType);
+
+        var res = await fetch(url, { credentials: 'same-origin' });
+        var data = await res.json().catch(function () { return null; });
+        if (!res.ok || !data || data.status !== 1) {
+            renderUploadedDocs([]);
+            return;
+        }
+        renderUploadedDocs(data.data || []);
+    }
+
+    async function uploadDocs(applicationId) {
+        var btn = document.getElementById('cvUploadBtn');
+        var filesEl = document.getElementById('cvUploadFiles');
+        var typeEl = document.getElementById('cvUploadDocType');
+
+        if (!filesEl || !typeEl) return;
+
+        var files = filesEl.files;
+        if (!files || files.length === 0) {
+            setBoxMessage('cvUploadMessage', 'Please select file(s) to upload.', 'danger');
+            return;
+        }
+
+        setBoxMessage('cvUploadMessage', '', '');
+
+        if (btn) {
+            btn.disabled = true;
+            btn.dataset.originalText = btn.dataset.originalText || btn.textContent;
+            btn.textContent = 'Uploading...';
+        }
+
+        try {
+            var base = (window.APP_BASE_URL || '').replace(/\/$/, '');
+            var url = base + '/api/shared/verification_docs_upload.php';
+
+            var fd = new FormData();
+            fd.append('application_id', applicationId);
+            fd.append('doc_type', String(typeEl.value || 'general'));
+            fd.append('role', String(qs('role') || ''));
+            var clientId = qs('client_id');
+            if (clientId) fd.append('client_id', String(clientId));
+
+            for (var i = 0; i < files.length; i++) {
+                fd.append('files[]', files[i]);
+            }
+
+            var res = await fetch(url, {
+                method: 'POST',
+                body: fd,
+                credentials: 'same-origin'
+            });
+
+            var data = await res.json().catch(function () { return null; });
+            if (!res.ok || !data || data.status !== 1) {
+                throw new Error((data && data.message) ? data.message : 'Upload failed');
+            }
+
+            setBoxMessage('cvUploadMessage', 'Uploaded successfully.', 'success');
+            filesEl.value = '';
+            setSelectedFilesUi([]);
+            await loadUploadedDocs(applicationId, '');
+        } catch (e) {
+            setBoxMessage('cvUploadMessage', e && e.message ? e.message : 'Upload failed', 'danger');
+        } finally {
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = btn.dataset.originalText || 'Upload';
+            }
+        }
+    }
+
+    async function loadReport() {
+        var applicationId = qs('application_id') || '';
+        var caseId = qs('case_id') || '';
+        var clientId = qs('client_id') || '';
+        var role = qs('role') || '';
+
+        function qaAudit(event, meta) {
+            if (String(role || '').toLowerCase().trim() !== 'qa') return;
+            if (!applicationId) return;
+            var base = (window.APP_BASE_URL || '').replace(/\/$/, '');
+            fetch(base + '/api/qa/report_audit.php', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ application_id: applicationId, event: event, meta: meta || null })
+            }).catch(function () {
+            });
+        }
+
+        var base = (window.APP_BASE_URL || '').replace(/\/$/, '');
+        var url = '';
+        if (applicationId) {
+            url = base + '/api/shared/candidate_report_get.php?application_id=' + encodeURIComponent(applicationId);
+        } else if (caseId) {
+            url = base + '/api/shared/candidate_report_get.php?case_id=' + encodeURIComponent(caseId);
+        } else {
+            setText('cvTopMessage', 'application_id is required in URL');
+            return;
+        }
+
+        var role2 = (qs('role') || '').toString().toLowerCase().trim();
+        if (role2) {
+            url += '&role=' + encodeURIComponent(role2);
+        }
+        if (role2 === 'verifier') {
+            var g = getVerifierGroup();
+            if (g) {
+                url += '&group=' + encodeURIComponent(g);
+            }
+            var cid = (qs('client_id') || '').toString().trim();
+            if (cid) {
+                url += '&client_id=' + encodeURIComponent(cid);
+            }
+        }
+
+        // Note: role/client_id already appended above; do not duplicate query params.
+
+        await loadHolidaysOnce();
+        var res = await fetch(url, { credentials: 'same-origin' });
+        var payload = await res.json().catch(function () { return null; });
+
+        if (!res.ok || !payload || payload.status !== 1) {
+            var msg = (payload && payload.message) ? payload.message : 'Failed to load report.';
+            setText('cvTopMessage', msg);
+            return;
+        }
+
+        // QA/TL audit: opening the report
+        if (!document.body.dataset.qaAuditOpenLogged) {
+            document.body.dataset.qaAuditOpenLogged = '1';
+            qaAudit('open', { source: 'candidate_report', embed: String(qs('embed') || '') === '1' ? 1 : 0 });
+        }
+
+        setText('cvTopMessage', '');
+
+        var d = payload.data || {};
+        REPORT_PAYLOAD = d;
+
+        // Re-apply section filtering once assigned components are known
+        initSectionNav();
+        renderComponentNav(REPORT_PAYLOAD);
+        var basic = d.basic || {};
+        var contact = d.contact || {};
+        var ref = d.reference || {};
+        var app = d.application || {};
+        var cs = d.case || {};
+        var auth = d.authorization || {};
+
+        if (!applicationId && cs && cs.application_id) {
+            applicationId = String(cs.application_id);
+        }
+
+        CURRENT_APP_ID = applicationId || '';
+
+        initHeaderModals(applicationId);
+        loadTimeline(applicationId);
+
+        renderDocPreviewPanel(d.uploaded_docs || []);
+
+        updateSectionBadges(d);
+
+        var isPrint = String(qs('print') || '') === '1';
+        if (isPrint) {
+            // QA/TL audit: print view opened
+            if (!document.body.dataset.qaAuditPrintLogged) {
+                document.body.dataset.qaAuditPrintLogged = '1';
+                qaAudit('print', { source: 'candidate_report', print: 1 });
+            }
+            var coverName = ((cs.candidate_first_name || '') + ' ' + (cs.candidate_last_name || '')).trim() || (basic.first_name || '') + ' ' + (basic.last_name || '');
+            var coverApp = applicationId;
+            var coverCase = cs.case_id ? String(cs.case_id) : '';
+            var coverClient = cs.client_id ? String(cs.client_id) : '';
+
+            setText('cvPdfCoverCandidate', coverName);
+            setHtml('cvPdfCoverMeta',
+                '<div><b>Application:</b> ' + esc(coverApp) + '</div>' +
+                '<div><b>Case ID:</b> ' + esc(coverCase) + '</div>' +
+                '<div><b>Client ID:</b> ' + esc(coverClient) + '</div>' +
+                '<div><b>Generated:</b> ' + esc(new Date().toLocaleString()) + '</div>'
+            );
+            setHtml('cvPdfCoverNote',
+                'This report is confidential and intended solely for background verification purposes. ' +
+                'Access and usage must comply with applicable laws and client authorization.'
+            );
+            setText('cvPdfCoverFooterLeft', 'Application: ' + coverApp);
+
+            var metaHtml =
+                '<div><b>Candidate:</b> ' + esc(coverName) + '</div>' +
+                '<div><b>Application:</b> ' + esc(coverApp) + '</div>' +
+                '<div><b>Status:</b> ' + esc(app.status || cs.case_status || '') + '</div>';
+            setHtml('cvPdfSummaryMeta', metaHtml);
+            setHtml('cvPdfChecklistMeta', metaHtml);
+            setHtml('cvPdfAllFieldsMeta', metaHtml);
+            setHtml('cvPdfDocsMeta', metaHtml);
+
+            var hostId = 'cvPrintAllFields';
+            var host = document.getElementById(hostId);
+            if (host) host.innerHTML = '';
+
+            renderKeyValue(hostId, 'Case', cs);
+            renderKeyValue(hostId, 'Application', app);
+            renderKeyValue(hostId, 'Basic Details', basic);
+            renderKeyValue(hostId, 'Contact Details', contact);
+            renderKeyValue(hostId, 'Reference Details', ref);
+            renderKeyValue(hostId, 'Authorization', auth);
+
+            renderArray(hostId, 'Identification Details', d.identification || []);
+            renderArray(hostId, 'Education Details', d.education || []);
+            renderArray(hostId, 'Employment Details', d.employment || []);
+
+            renderDocsForPrint('cvPrintAllDocs', d.uploaded_docs || []);
+
+            // Summary grid
+            var summary = [];
+            summary.push(kvBox('Candidate', coverName));
+            summary.push(kvBox('Email', (basic.email || cs.candidate_email || '') + ''));
+            summary.push(kvBox('Mobile', (basic.mobile || cs.candidate_mobile || '') + ''));
+            summary.push(kvBox('Case ID', coverCase));
+            summary.push(kvBox('Application ID', coverApp));
+            summary.push(kvBox('Status', (app.status || cs.case_status || '') + ''));
+            setHtml('cvPdfSummaryGrid', summary.join(''));
+
+            // Executive summary + checklist + grouped docs
+            renderExecutive('cvPdfExecutive', d);
+            renderChecklist('cvPdfChecklist', d.uploaded_docs || []);
+            renderDocsGrouped('cvPdfDocsGrouped', d.uploaded_docs || []);
+        }
+
+        setText('cvHeaderCandidate', (cs.candidate_first_name || '') + ' ' + (cs.candidate_last_name || ''));
+        setText('cvHeaderAppId', applicationId);
+        setText('cvHeaderStatus', (app.status || cs.case_status || ''));
+        var tatDays = cs && typeof cs.internal_tat !== 'undefined' ? (parseInt(cs.internal_tat || '20', 10) || 20) : 20;
+        var rules = cs && cs.weekend_rules ? cs.weekend_rules : 'exclude';
+        setText('cvHeaderTat', tatLabelFromCreated(cs.created_at || '', { internal_tat: tatDays, weekend_rules: rules }));
+
+        var tatLabel = tatLabelFromCreated(cs.created_at || '', { internal_tat: tatDays, weekend_rules: rules });
+        setText('cvSectionTatBasic', tatLabel ? ('Component TAT: ' + tatLabel) : '');
+        setText('cvSectionTatId', tatLabel ? ('Component TAT: ' + tatLabel) : '');
+        setText('cvSectionTatContact', tatLabel ? ('Component TAT: ' + tatLabel) : '');
+        setText('cvSectionTatEducation', tatLabel ? ('Component TAT: ' + tatLabel) : '');
+        setText('cvSectionTatEmployment', tatLabel ? ('Component TAT: ' + tatLabel) : '');
+        setText('cvSectionTatReference', tatLabel ? ('Component TAT: ' + tatLabel) : '');
+        setText('cvSectionTatReports', tatLabel ? ('Component TAT: ' + tatLabel) : '');
+
+        // If case is already approved, prevent further action changes from this view
+        var statusStr = String(app.status || cs.case_status || '').toUpperCase();
+        if (statusStr === 'APPROVED' || statusStr.indexOf('APPROVE') !== -1) {
+            var holdBtn = document.getElementById('cvActionHold');
+            var rejectBtn = document.getElementById('cvActionReject');
+            var stopBtn = document.getElementById('cvActionStopBgv');
+            if (holdBtn) holdBtn.style.display = 'none';
+            if (rejectBtn) rejectBtn.style.display = 'none';
+            if (stopBtn) stopBtn.style.display = 'none';
+        }
+
+        initCaseActions(applicationId);
+        initVerifierMailAndPrint(function () { return REPORT_PAYLOAD; });
+
+        setVal('cv_basic_first_name', basic.first_name || cs.candidate_first_name || '');
+        setVal('cv_basic_last_name', basic.last_name || cs.candidate_last_name || '');
+        setVal('cv_basic_dob', window.GSS_DATE.formatDbDateTime(basic.dob || ''));
+        setVal('cv_basic_mobile', basic.mobile || cs.candidate_mobile || '');
+        setVal('cv_basic_email', basic.email || cs.candidate_email || '');
+        setVal('cv_basic_gender', basic.gender || '');
+        setVal('cv_basic_father_name', basic.father_name || '');
+        setVal('cv_basic_mother_name', basic.mother_name || '');
+        setVal('cv_basic_country', basic.country || '');
+        setVal('cv_basic_state', basic.state || '');
+        setVal('cv_basic_nationality', basic.nationality || '');
+        setVal('cv_basic_marital_status', basic.marital_status || '');
+
+        setVal('cv_contact_current_address', [contact.address1, contact.address2, contact.city, contact.state, contact.country, contact.postal_code].filter(Boolean).join(', '));
+        setVal('cv_contact_permanent_address', [contact.permanent_address1, contact.permanent_address2, contact.permanent_city, contact.permanent_state, contact.permanent_country, contact.permanent_postal_code].filter(Boolean).join(', '));
+        setVal('cv_contact_proof_type', contact.proof_type || '');
+        setFileField('cv_contact_proof_file', 'proof_file', contact.proof_file || '');
+
+        setVal('cv_reference_name', ref.reference_name || '');
+        setVal('cv_reference_designation', ref.reference_designation || '');
+        setVal('cv_reference_company', ref.reference_company || '');
+        setVal('cv_reference_mobile', ref.reference_mobile || '');
+        setVal('cv_reference_email', ref.reference_email || '');
+        setVal('cv_reference_relationship', ref.relationship || '');
+        setVal('cv_reference_years_known', ref.years_known || '');
+
+        setVal('cv_auth_signature', auth.digital_signature || '');
+        setVal('cv_auth_file_name', auth.file_name || '');
+        setVal('cv_auth_uploaded_at', window.GSS_DATE.formatDbDateTime(auth.uploaded_at || ''));
+        setVal('cv_app_submitted_at', window.GSS_DATE.formatDbDateTime(app.submitted_at || ''));
+
+        simplifyAllReadonlyFields();
+
+        renderTable('cv_identification_table', d.identification || [], [
+            { key: 'document_index', label: '#' },
+            { key: 'documentId_type', label: 'Document Type' },
+            { key: 'id_number', label: 'ID Number' },
+            { key: 'name', label: 'Name on ID' },
+            { key: 'upload_document', label: 'Uploaded File' }
+        ]);
+
+        renderTable('cv_education_table', d.education || [], [
+            { key: 'education_index', label: '#' },
+            { key: 'qualification', label: 'Qualification' },
+            { key: 'college_name', label: 'College' },
+            { key: 'university_board', label: 'University/Board' },
+            { key: 'year_from', label: 'From' },
+            { key: 'year_to', label: 'To' },
+            { key: 'roll_number', label: 'Roll No' },
+            { key: 'marksheet_file', label: 'Marksheet' },
+            { key: 'degree_file', label: 'Degree' }
+        ]);
+
+        renderTable('cv_employment_table', d.employment || [], [
+            { key: 'employment_index', label: '#' },
+            { key: 'employer_name', label: 'Employer' },
+            { key: 'job_title', label: 'Job Title' },
+            { key: 'employee_id', label: 'Employee ID' },
+            { key: 'joining_date', label: 'Joining' },
+            { key: 'relieving_date', label: 'Relieving' },
+            { key: 'currently_employed', label: 'Currently Employed' },
+            { key: 'contact_employer', label: 'Contact Employer' },
+            { key: 'employment_doc', label: 'Document' }
+        ]);
+
+        var uploadTypeEl = document.getElementById('cvUploadDocType');
+        var currentType = uploadTypeEl ? String(uploadTypeEl.value || '') : '';
+        await loadUploadedDocs(applicationId, currentType);
+
+        if (uploadTypeEl && !uploadTypeEl.dataset.bound) {
+            uploadTypeEl.dataset.bound = '1';
+            uploadTypeEl.addEventListener('change', function () {
+                loadUploadedDocs(applicationId, String(uploadTypeEl.value || ''));
+            });
+        }
+
+        var uploadBtn = document.getElementById('cvUploadBtn');
+        if (uploadBtn) {
+            uploadBtn.addEventListener('click', function () {
+                uploadDocs(applicationId);
+            });
+        }
+
+        return d;
+    }
+
+    document.addEventListener('DOMContentLoaded', function () {
+        initSectionNav();
+        initUploadPicker();
+        initValidatorRemarks();
+        loadReport().then(function (payload) {
+            initVerifierCompleteNext(function () { return payload; });
+        }).catch(function (e) {
+            setText('cvTopMessage', (e && e.message) ? e.message : 'Failed to load report');
+        });
+    });
+})();
