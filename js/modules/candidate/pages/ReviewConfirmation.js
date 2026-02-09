@@ -40,7 +40,7 @@ class ReviewConfirmation {
         signatureInput.addEventListener('input', validate);
         
         // Submit handler
-        submitBtn.addEventListener('click', (e) => {
+        submitBtn.addEventListener('click', async (e) => {
             e.preventDefault();
             
             if (submitBtn.disabled) {
@@ -48,15 +48,43 @@ class ReviewConfirmation {
                 return;
             }
             
-            this.showNotification("✅ Starting application...", "success");
-            
+            this.showNotification("✅ Saving authorization...", "success");
+
+            try {
+                submitBtn.disabled = true;
+
+                const fd = new FormData();
+                fd.append('agree_check', agreeCheck.checked ? '1' : '');
+                fd.append('digital_signature', String(signatureInput.value || '').trim());
+
+                const res = await fetch(`${window.APP_BASE_URL}/api/candidate/store_authorization.php`, {
+                    method: 'POST',
+                    body: fd,
+                    credentials: 'same-origin'
+                });
+
+                const data = await res.json().catch(() => null);
+                if (!data || data.success !== true) {
+                    const msg = data && data.message ? data.message : 'Failed to save authorization';
+                    this.showNotification(msg, 'warning');
+                    submitBtn.disabled = false;
+                    return;
+                }
+
+                this.showNotification("✅ Authorization saved", "success");
+            } catch (err) {
+                this.showNotification(err && err.message ? err.message : 'Failed to save authorization', 'warning');
+                submitBtn.disabled = false;
+                return;
+            }
+
             // Mark as completed
             if (window.Router && window.Router.markCompleted) {
                 Router.markCompleted('review-confirmation');
             } else {
                 localStorage.setItem('completed-review-confirmation', '1');
             }
-            
+
             // Navigate
             setTimeout(() => {
                 if (window.Router && window.Router.navigateTo) {

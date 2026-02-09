@@ -6,7 +6,7 @@ require_once __DIR__ . '/../../config/db.php';
 require_once __DIR__ . '/../../includes/auth.php';
 require_once __DIR__ . '/../../includes/mail.php';
 
-auth_require_login('client_admin');
+auth_require_any_access(['client_admin', 'gss_admin']);
 
 auth_session_start();
 
@@ -29,6 +29,16 @@ function post_int(string $key, int $default = 0): int {
 
 function resolve_client_id(): int {
     if (session_status() === PHP_SESSION_NONE) session_start();
+    $role = strtolower(auth_module_access());
+    if ($role === 'gss_admin') {
+        $cid = isset($_POST['client_id']) && $_POST['client_id'] !== '' ? (int)$_POST['client_id'] : 0;
+        if ($cid > 0) return $cid;
+
+        http_response_code(400);
+        echo json_encode(['status' => 0, 'message' => 'client_id is required']);
+        exit;
+    }
+
     $cid = isset($_SESSION['auth_client_id']) ? (int)$_SESSION['auth_client_id'] : 0;
     if ($cid > 0) return $cid;
 

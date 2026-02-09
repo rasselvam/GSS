@@ -1501,6 +1501,8 @@
         var base = (window.APP_BASE_URL || '').replace(/\/$/, '');
 
         if (v.indexOf('/uploads/') === 0) return base + v;
+        if (v.indexOf('uploads/') === 0) return base + '/' + v;
+        if (v.indexOf('uploads\\') === 0) return base + '/' + v.replace(/\\/g, '/');
         if (/^https?:\/\//i.test(v)) return v;
 
         var k = String(fieldKey || '').toLowerCase();
@@ -1684,6 +1686,13 @@
         var el = document.getElementById(id);
         if (!el) return;
         if (el.dataset.simpleDone) return;
+
+        // If this field was already converted into a link (setFileField) we should not overwrite it.
+        try {
+            var cs = window.getComputedStyle ? window.getComputedStyle(el) : null;
+            if (cs && cs.display === 'none') return;
+        } catch (_e) {
+        }
 
         var tag = String(el.tagName || '').toLowerCase();
         if (!(tag === 'input' || tag === 'select' || tag === 'textarea')) return;
@@ -2902,7 +2911,8 @@
         setVal('cv_contact_current_address', [contact.address1, contact.address2, contact.city, contact.state, contact.country, contact.postal_code].filter(Boolean).join(', '));
         setVal('cv_contact_permanent_address', [contact.permanent_address1, contact.permanent_address2, contact.permanent_city, contact.permanent_state, contact.permanent_country, contact.permanent_postal_code].filter(Boolean).join(', '));
         setVal('cv_contact_proof_type', contact.proof_type || '');
-        setFileField('cv_contact_proof_file', 'proof_file', contact.proof_file || '');
+        var contactProofFile = contact.proof_file || contact.address_proof_file || contact.address_proof || contact.proof || contact.proof_document || contact.proof_path || '';
+        setFileField('cv_contact_proof_file', 'proof_file', contactProofFile || '');
 
         setVal('cv_reference_name', ref.reference_name || '');
         setVal('cv_reference_designation', ref.reference_designation || '');
@@ -2912,9 +2922,13 @@
         setVal('cv_reference_relationship', ref.relationship || '');
         setVal('cv_reference_years_known', ref.years_known || '');
 
-        setVal('cv_auth_signature', auth.digital_signature || '');
-        setVal('cv_auth_file_name', auth.file_name || '');
-        setVal('cv_auth_uploaded_at', window.GSS_DATE.formatDbDateTime(auth.uploaded_at || ''));
+        var authSignature = auth.digital_signature || auth.signature || auth.authorization_signature || auth.auth_signature || '';
+        var authFileName = auth.file_name || auth.authorization_file_name || auth.auth_file_name || auth.filename || '';
+        var authUploadedAt = auth.uploaded_at || auth.authorization_uploaded_at || auth.auth_uploaded_at || auth.uploadedAt || '';
+
+        setVal('cv_auth_signature', authSignature || '');
+        setVal('cv_auth_file_name', authFileName || '');
+        setVal('cv_auth_uploaded_at', window.GSS_DATE.formatDbDateTime(authUploadedAt || ''));
         setVal('cv_app_submitted_at', window.GSS_DATE.formatDbDateTime(app.submitted_at || ''));
 
         simplifyAllReadonlyFields();

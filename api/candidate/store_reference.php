@@ -78,38 +78,78 @@ try {
     }
 
 
-    $stmt = $pdo->prepare("
-        CALL SP_Vati_Payfiller_save_reference_details(
-            :application_id,
-            :reference_name,
-            :reference_designation,
-            :reference_company,
-            :reference_mobile,
-            :reference_email,
-            :relationship,
-            :years_known
-        )
-    ");
+    try {
+        $stmt = $pdo->prepare("
+            CALL SP_Vati_Payfiller_save_reference_details(
+                :application_id,
+                :reference_name,
+                :reference_designation,
+                :reference_company,
+                :reference_mobile,
+                :reference_email,
+                :relationship,
+                :years_known
+            )
+        ");
 
-    $stmt->execute([
-        ':application_id'        => $application_id,
-        ':reference_name'        => $data['reference_name'],
-        ':reference_designation' => $data['reference_designation'],
-        ':reference_company'     => $data['reference_company'],
-        ':reference_mobile'      => $data['reference_mobile'],
-        ':reference_email'       => $data['reference_email'],
-        ':relationship'          => $data['relationship'],
-        ':years_known'           => $data['years_known']
-    ]);
+        $stmt->execute([
+            ':application_id'        => $application_id,
+            ':reference_name'        => $data['reference_name'],
+            ':reference_designation' => $data['reference_designation'],
+            ':reference_company'     => $data['reference_company'],
+            ':reference_mobile'      => $data['reference_mobile'],
+            ':reference_email'       => $data['reference_email'],
+            ':relationship'          => $data['relationship'],
+            ':years_known'           => $data['years_known']
+        ]);
 
-    
-    do {
-        if ($stmt->columnCount() > 0) {
-            $stmt->fetchAll(PDO::FETCH_ASSOC);
+        do {
+            if ($stmt->columnCount() > 0) {
+                $stmt->fetchAll(PDO::FETCH_ASSOC);
+            }
+        } while ($stmt->nextRowset());
+
+        $stmt->closeCursor();
+    } catch (Throwable $e) {
+        // Fallback if stored procedure isn't available or fails
+        $check = $pdo->prepare('SELECT id FROM Vati_Payfiller_Candidate_Reference_details WHERE application_id = ? LIMIT 1');
+        $check->execute([$application_id]);
+        $exists = (int)($check->fetchColumn() ?: 0);
+
+        if ($exists > 0) {
+            $upd = $pdo->prepare(
+                'UPDATE Vati_Payfiller_Candidate_Reference_details '
+                . 'SET reference_name = ?, reference_designation = ?, reference_company = ?, reference_mobile = ?, reference_email = ?, relationship = ?, years_known = ?, updated_at = NOW() '
+                . 'WHERE application_id = ?'
+            );
+            $upd->execute([
+                $data['reference_name'],
+                $data['reference_designation'],
+                $data['reference_company'],
+                $data['reference_mobile'],
+                $data['reference_email'],
+                $data['relationship'],
+                $data['years_known'],
+                $application_id
+            ]);
+        } else {
+            $ins = $pdo->prepare(
+                'INSERT INTO Vati_Payfiller_Candidate_Reference_details '
+                . '(application_id, reference_name, reference_designation, reference_company, reference_mobile, reference_email, relationship, years_known, created_at, updated_at) '
+                . 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())'
+            );
+            $ins->execute([
+                $application_id,
+                $data['reference_name'],
+                $data['reference_designation'],
+                $data['reference_company'],
+                $data['reference_mobile'],
+                $data['reference_email'],
+                $data['relationship'],
+                $data['years_known']
+            ]);
         }
-    } while ($stmt->nextRowset());
-
-    $stmt->closeCursor();
+    }
 
 
     $fetchStmt = $pdo->prepare("

@@ -255,6 +255,33 @@ try {
     $uploadedDocs = sp_fetch_all($bundle);
     sp_drain($bundle);
 
+    try {
+        if (!$application || !is_array($application)) {
+            $application = [];
+        }
+        if (!array_key_exists('status', $application) || !array_key_exists('submitted_at', $application)) {
+            $appStmt = $pdo->prepare('SELECT status, submitted_at FROM Vati_Payfiller_Candidate_Applications WHERE application_id = ? LIMIT 1');
+            $appStmt->execute([$applicationId]);
+            $appRow = $appStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+            if (!array_key_exists('status', $application) && isset($appRow['status'])) {
+                $application['status'] = $appRow['status'];
+            }
+            if (!array_key_exists('submitted_at', $application) && isset($appRow['submitted_at'])) {
+                $application['submitted_at'] = $appRow['submitted_at'];
+            }
+        }
+
+        if (!$authorization || !is_array($authorization) || (!isset($authorization['digital_signature']) && !isset($authorization['file_name']) && !isset($authorization['uploaded_at']))) {
+            $authStmt = $pdo->prepare('SELECT file_name, digital_signature, uploaded_at FROM Vati_Payfiller_Candidate_Authorization_documents WHERE application_id = ? ORDER BY uploaded_at DESC LIMIT 1');
+            $authStmt->execute([$applicationId]);
+            $authRow = $authStmt->fetch(PDO::FETCH_ASSOC) ?: null;
+            if ($authRow) {
+                $authorization = $authRow;
+            }
+        }
+    } catch (Throwable $e) {
+    }
+
     if (!$case) {
         http_response_code(404);
         echo json_encode(['status' => 0, 'message' => 'Case not found for this application_id']);

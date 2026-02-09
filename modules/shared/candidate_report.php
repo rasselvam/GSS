@@ -481,6 +481,10 @@ ob_start();
     .cr-remarks textarea{padding:8px 10px; border-radius:12px;}
     .cr-chip{display:inline-flex; align-items:center; gap:8px;}
     .cr-chip .cr-chip-x{border:0; background:transparent; color:#1e40af; font-weight:900; cursor:pointer; padding:0; line-height:1;}
+
+    .cr-report-root .table-scroll .table{min-width:100% !important;}
+    .cr-report-root .table td{white-space:normal;}
+    .cr-report-root .table td:last-child,.cr-report-root .table th:last-child{white-space:normal;}
     #cvUploadCard .card-subtitle{margin-top:4px; font-size:12px; color:#64748b;}
     #cvUploadCard h3{font-size:14px; font-weight:900;}
     #cvUploadCard label{font-size:12px; color:#334155;}
