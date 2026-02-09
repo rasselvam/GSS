@@ -1,2 +1,3 @@
 .env
 db_sp/
+config/db_config.txt
